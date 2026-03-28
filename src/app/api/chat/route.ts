@@ -20,7 +20,10 @@ export async function POST(request: Request) {
   //   OPENAI_API_KEY → API 密钥
   //   OPENAI_BASE_URL → API 地址（DeepSeek: https://api.deepseek.com）
   const result = streamText({
-    model: openai(process.env.OPENAI_MODEL || "deepseek-chat"),
+    // 重要：必须用 openai.chat() 而不是 openai()
+    // openai() 默认调用 Responses API（/responses 端点），只有 OpenAI 官方支持
+    // openai.chat() 调用 Chat Completions API（/v1/chat/completions），DeepSeek 等兼容 API 都支持
+    model: openai.chat(process.env.OPENAI_MODEL || "deepseek-chat"),
     // DemoGen 的系统提示 — 告诉 AI 它是一个项目展示助手
     system: `你是 DemoGen 的 AI 助手，专门帮助用户将软件项目转化为高质量的展示资产。
 
