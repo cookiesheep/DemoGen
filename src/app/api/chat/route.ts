@@ -1,44 +1,107 @@
 // src/app/api/chat/route.ts
 // AI 对话接口 — 接收前端消息，通过 DeepSeek API 流式返回回复
-import { streamText, convertToModelMessages } from "ai";
+// Step 2 新增：工具调用（analyzeRepo）让 AI 能解析 GitHub 仓库
+import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
 import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+import {
+  parseGitHubUrl,
+  analyzeRepo,
+} from "@/lib/github/analyzer";
+import { projectUnderstandingSchema, displayStrategySchema } from "@/lib/ai/schemas";
+import { DEMOGEN_SYSTEM_PROMPT, buildAnalysisPrompt } from "@/lib/ai/prompts";
 
 export async function POST(request: Request) {
-  // 从请求体中解析消息列表
-  // AI SDK v6 的前端发送的是 UIMessage 格式（带 parts 数组），
-  // 而不是旧版的 { role, content } 格式
   const { messages } = await request.json();
 
-  // 将前端的 UIMessage 格式转换为模型能理解的 ModelMessage 格式
-  // UIMessage 用 parts: [{ type: "text", text: "..." }] 表示内容
-  // ModelMessage 用 content: "..." 或 content: [{ type: "text", text: "..." }] 表示
-  // 这一步是 AI SDK v6 的关键变化
+  // 将前端的 UIMessage 格式转换为模型能理解的格式
   const modelMessages = await convertToModelMessages(messages);
 
-  // 使用 Vercel AI SDK 的 streamText 进行流式生成
-  // @ai-sdk/openai 会自动读取环境变量：
-  //   OPENAI_API_KEY → API 密钥
-  //   OPENAI_BASE_URL → API 地址（DeepSeek: https://api.deepseek.com）
   const result = streamText({
-    // 重要：必须用 openai.chat() 而不是 openai()
-    // openai() 默认调用 Responses API（/responses 端点），只有 OpenAI 官方支持
-    // openai.chat() 调用 Chat Completions API（/v1/chat/completions），DeepSeek 等兼容 API 都支持
     model: openai.chat(process.env.OPENAI_MODEL || "deepseek-chat"),
-    // DemoGen 的系统提示 — 告诉 AI 它是一个项目展示助手
-    system: `你是 DemoGen 的 AI 助手，专门帮助用户将软件项目转化为高质量的展示资产。
-
-你的职责：
-1. 理解用户的项目（通过 GitHub 链接、README、截图或描述）
-2. 分析项目类型和亮点
-3. 推荐最适合的展示策略
-4. 生成讲稿、PPT 大纲、一页式介绍等展示资产
-
-当前阶段你还在开发中，暂时只能进行对话。请用友好专业的语气与用户交流。
-回复请使用中文，保留英文技术术语。`,
+    system: DEMOGEN_SYSTEM_PROMPT,
     messages: modelMessages,
+
+    // 工具定义 — 让 AI 能调用外部功能
+    // 当 AI 判断需要分析仓库时，会自动调用 analyzeRepo 工具
+    tools: {
+      /**
+       * analyzeRepo 工具 — 解析 GitHub 仓库
+       * AI 检测到用户发送了 GitHub 链接时会调用此工具
+       * 工具执行后返回的结果会作为上下文继续对话
+       */
+      analyzeRepo: tool({
+        description:
+          "分析 GitHub 仓库，获取 README、目录结构、依赖信息等。当用户提供了 GitHub 链接时调用此工具。",
+        inputSchema: z.object({
+          url: z.string().describe("GitHub 仓库的 URL"),
+        }),
+        execute: async ({ url }) => {
+          // 从 URL 中提取 owner 和 repo
+          const parsed = parseGitHubUrl(url);
+          if (!parsed) {
+            return { error: "无法解析 GitHub URL，请提供有效的仓库链接" };
+          }
+
+          try {
+            // 调用 GitHub API 获取仓库信息
+            const analysis = await analyzeRepo(parsed.owner, parsed.repo);
+
+            // 构建分析提示，让 AI 基于数据进行结构化分析
+            const analysisPrompt = buildAnalysisPrompt(analysis);
+
+            return {
+              success: true,
+              repoInfo: {
+                name: analysis.name,
+                fullName: analysis.fullName,
+                description: analysis.description,
+                language: analysis.language,
+                stars: analysis.stars,
+                topics: analysis.topics,
+                hasDeployUrl: analysis.hasDeployUrl,
+                deployUrl: analysis.deployUrl,
+              },
+              analysisPrompt,
+            };
+          } catch (error) {
+            return {
+              error: `仓库解析失败: ${error instanceof Error ? error.message : "未知错误"}`,
+            };
+          }
+        },
+      }),
+
+      /**
+       * generateProjectUnderstanding 工具 — 生成结构化项目理解
+       * AI 分析完仓库后调用此工具，输出结构化的项目理解卡片数据
+       * 前端会监听这个工具的输出，渲染到右侧预览面板
+       */
+      generateProjectUnderstanding: tool({
+        description:
+          "生成结构化的项目理解卡片。在分析完仓库信息后调用此工具，将分析结果结构化输出。",
+        inputSchema: projectUnderstandingSchema,
+        // 无 execute — 前端工具，参数由前端 onToolCall 接收并渲染
+      }),
+
+      /**
+       * generateDisplayStrategy 工具 — 生成展示策略推荐
+       * AI 了解用户展示场景后调用此工具，输出结构化策略数据
+       * 前端监听并渲染到右侧预览面板
+       */
+      generateDisplayStrategy: tool({
+        description:
+          "生成展示策略卡片。在了解用户的展示场景和需求后调用此工具，推荐资产组合和展示结构。",
+        inputSchema: displayStrategySchema,
+        // 无 execute — 前端工具
+      }),
+    },
+
+    // 多步工具调用 — AI 可以连续调用多个工具
+    // 例如：analyzeRepo（获取数据）→ generateProjectUnderstanding（生成卡片）→ 继续对话
+    // stepCountIs(5) 表示最多允许 5 轮工具调用，防止无限循环
+    stopWhen: stepCountIs(5),
   });
 
-  // 返回流式响应
-  // toUIMessageStreamResponse() 将模型输出转换成前端 assistant-ui 能解析的流格式
   return result.toUIMessageStreamResponse();
 }
