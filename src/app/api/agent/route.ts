@@ -3,6 +3,9 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, tool, UIMessage, stepCountIs, convertToModelMessages } from "ai";
 import { z } from "zod";
+import { parseGitHubUrl, analyzeRepo } from "@/lib/github/analyzer";
+import { analyzeProject } from "@/lib/ai/subagents/analysis";
+import { ORCHESTRATOR_PROMPT } from "@/lib/ai/prompts";
 
 // 创建 OpenAI 兼容的模型实例（支持 DeepSeek / 第三方中转等）
 // 注意：必须用 openai.chat() 而不是 openai()，后者会走 Responses API
@@ -12,20 +15,6 @@ const openai = createOpenAI({
 });
 
 const model = openai.chat(process.env.OPENAI_MODEL || "gpt-4o");
-
-// Orchestrator 的 system prompt（Phase 1 简化版）
-const ORCHESTRATOR_PROMPT = `你是 DemoGen 的 Orchestrator Agent —— 一个专门帮助用户生成项目展示资产的 AI 助手。
-
-你的职责：
-1. 接收用户提交的项目信息（GitHub 链接、文档、描述等）
-2. 调用工具分析项目、规划策略、生成展示资产
-3. 全程保持简洁、专业的沟通风格
-
-当前阶段（Phase 1）你可以：
-- 与用户正常对话
-- 调用 getCurrentTime 工具获取当前时间（测试工具调用是否正常）
-
-请用中文和用户交流，保留英文技术术语。回复要简洁有力，不要啰嗦。`;
 
 export async function POST(req: Request) {
   // 从请求中获取消息列表（AI SDK v6 格式）
@@ -41,10 +30,9 @@ export async function POST(req: Request) {
     messages: modelMessages,
     // 定义 Agent 可用的工具
     tools: {
-      // 测试工具：获取当前时间（验证工具调用流程）
+      // 测试工具：获取当前时间
       getCurrentTime: tool({
         description: "获取当前的日期和时间",
-        // AI SDK v6: 用 inputSchema 而不是 parameters
         inputSchema: z.object({
           timezone: z
             .string()
@@ -55,6 +43,53 @@ export async function POST(req: Request) {
           const tz = timezone || "Asia/Shanghai";
           const now = new Date().toLocaleString("zh-CN", { timeZone: tz });
           return { time: now, timezone: tz };
+        },
+      }),
+
+      // 核心工具：分析项目
+      // Orchestrator 调用此工具时，内部会串联 GitHub API + Analysis Subagent
+      analyzeProject: tool({
+        description:
+          "分析用户提交的项目资料（GitHub 链接、文档、描述），生成结构化的项目理解",
+        inputSchema: z.object({
+          githubUrl: z
+            .string()
+            .optional()
+            .describe("GitHub 仓库链接"),
+          description: z
+            .string()
+            .optional()
+            .describe("用户对项目的文字描述"),
+        }),
+        execute: async ({ githubUrl, description }) => {
+          // Step 1: 如果有 GitHub 链接，先获取仓库数据
+          let githubData = undefined;
+          if (githubUrl) {
+            const parsed = parseGitHubUrl(githubUrl);
+            if (!parsed) {
+              return { error: "无法解析 GitHub 链接，请检查格式" };
+            }
+            try {
+              githubData = await analyzeRepo(parsed.owner, parsed.repo);
+            } catch (err) {
+              return {
+                error: `获取 GitHub 仓库数据失败: ${err instanceof Error ? err.message : String(err)}`,
+              };
+            }
+          }
+
+          // Step 2: 调用 Analysis Subagent 生成结构化理解
+          try {
+            const understanding = await analyzeProject({
+              githubData,
+              description,
+            });
+            return { success: true, data: understanding };
+          } catch (err) {
+            return {
+              error: `AI 分析失败: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
         },
       }),
     },

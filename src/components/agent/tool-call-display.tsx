@@ -1,11 +1,15 @@
 // 工具调用展示组件 — 显示 Agent 的工具调用状态（running/complete/error）
 // 让用户能看到 Agent 正在做什么，类似 Claude Code 的工具调用展示
+// 特定工具（如 analyzeProject）完成时，会将结果推送到 PreviewContext
 "use client";
 
+import { useEffect } from "react";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
-import { Clock, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { usePreview } from "../preview/preview-context";
+import type { ProjectUnderstanding } from "@/lib/ai/schemas";
 
-// 通用工具调用展示 — 作为 MessagePrimitive.Content 的 ToolCall 组件
+// 通用工具调用展示 — 作为 MessagePrimitive.Content 的 tools.Fallback 组件
 export function ToolCallDisplay(props: ToolCallMessagePartProps) {
   const { toolName, args, result, status } = props;
   const isRunning = status.type === "running";
@@ -47,12 +51,64 @@ export function ToolCallDisplay(props: ToolCallMessagePartProps) {
         </div>
       )}
 
-      {/* 工具结果 — 完成后显示 */}
+      {/* 工具结果 — 完成后显示摘要 */}
       {isComplete && result && (
-        <div className="px-3 py-2 text-xs">
-          {formatResult(result)}
+        <ToolResultSummary toolName={toolName} result={result} />
+      )}
+
+      {/* 错误信息 */}
+      {isError && (
+        <div className="px-3 py-2 text-xs text-red-600">
+          工具调用失败
         </div>
       )}
+    </div>
+  );
+}
+
+// 工具结果摘要 — 根据工具类型展示不同内容，同时触发预览面板更新
+function ToolResultSummary({
+  toolName,
+  result,
+}: {
+  toolName: string;
+  result: unknown;
+}) {
+  const preview = usePreview();
+
+  // 当 analyzeProject 工具完成时，将结果推送到预览面板
+  useEffect(() => {
+    if (toolName === "analyzeProject" && result) {
+      const res = result as { success?: boolean; data?: ProjectUnderstanding; error?: string };
+      if (res.success && res.data) {
+        preview.setProjectUnderstanding(res.data);
+      }
+    }
+    // 只在 result 变化时触发，preview 的 setter 是 stable 的
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolName, result]);
+
+  // analyzeProject 完成后的简要提示
+  if (toolName === "analyzeProject") {
+    const res = result as { success?: boolean; data?: ProjectUnderstanding; error?: string };
+    if (res.error) {
+      return (
+        <div className="px-3 py-2 text-xs text-red-600">{res.error}</div>
+      );
+    }
+    if (res.success && res.data) {
+      return (
+        <div className="px-3 py-2 text-xs text-green-700">
+          已生成项目理解卡片 — 请在右侧查看
+        </div>
+      );
+    }
+  }
+
+  // 默认：显示 JSON 格式的结果
+  return (
+    <div className="px-3 py-2 text-xs">
+      {formatResult(result)}
     </div>
   );
 }
@@ -74,6 +130,7 @@ function getToolDisplayName(toolName: string): string {
 // 格式化工具参数为可读文本
 function formatArgs(args: Record<string, unknown>): string {
   return Object.entries(args)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
     .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
     .join(" | ");
 }
