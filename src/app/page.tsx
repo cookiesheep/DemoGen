@@ -1,65 +1,48 @@
-import Image from "next/image";
+// src/app/page.tsx
+// DemoGen 主页面 — 左右分栏布局，连接 AI runtime
+"use client";
 
+import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
+import { ChatPanel } from "@/components/chat/chat-panel";
+import { PreviewPanel } from "@/components/preview/preview-panel";
+
+/**
+ * DemoGen 主页面
+ *
+ * 架构说明：
+ * 1. useChatRuntime() — 创建一个连接到 /api/chat 的 AI 运行时
+ *    它内部使用 Vercel AI SDK 的 useChat hook，处理消息发送和流式接收
+ *    默认会向 /api/chat 发送 POST 请求（DefaultChatTransport 的默认值）
+ *
+ * 2. AssistantRuntimeProvider — 将运行时注入 React context
+ *    所有子组件（如 ThreadPrimitive、ComposerPrimitive）
+ *    都通过 context 自动获取消息状态和发送方法
+ *
+ * 3. 页面分为左右两栏：
+ *    - 左侧 (40%): 聊天面板，AI 引导用户描述项目
+ *    - 右侧 (60%): 预览面板，展示生成的资产
+ */
 export default function Home() {
+  // 创建 AI 聊天运行时
+  // 不传参数时，默认使用 DefaultChatTransport 连接到 /api/chat
+  // 即对应 src/app/api/chat/route.ts
+  const runtime = useChatRuntime();
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    // AssistantRuntimeProvider 让所有子组件都能访问 AI 运行时
+    <AssistantRuntimeProvider runtime={runtime}>
+      {/* 左右分栏容器 — 占满整个视口高度 */}
+      <div className="flex h-screen">
+        {/* 左侧聊天面板 — 固定宽度区间 */}
+        <div className="w-2/5 min-w-[320px] max-w-[480px]">
+          <ChatPanel />
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        {/* 右侧预览面板 — 占满剩余空间 */}
+        <div className="flex-1">
+          <PreviewPanel />
         </div>
-      </main>
-    </div>
+      </div>
+    </AssistantRuntimeProvider>
   );
 }
