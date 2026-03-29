@@ -3,6 +3,7 @@
 "use client";
 
 import type { ProjectUnderstanding } from "@/lib/ai/schemas";
+import { Section } from "@/components/ui/section";
 import {
   Code2,
   Users,
@@ -107,35 +108,3 @@ export function ProjectCard({ data }: ProjectCardProps) {
   );
 }
 
-// 通用 Section 组件 — 标题 + 图标 + 内容
-function Section({
-  icon: Icon,
-  title,
-  variant,
-  children,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  title: string;
-  variant?: "warning";
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={`rounded-lg border p-3 ${
-        variant === "warning"
-          ? "border-amber-200 bg-amber-50"
-          : "border-border bg-card"
-      }`}
-    >
-      <div className="flex items-center gap-2 mb-2">
-        <Icon
-          className={`h-4 w-4 ${
-            variant === "warning" ? "text-amber-500" : "text-muted-foreground"
-          }`}
-        />
-        <h3 className="text-sm font-medium">{title}</h3>
-      </div>
-      {children}
-    </div>
-  );
-}

@@ -1,18 +1,10 @@
 // Analysis Subagent — 分析项目资料，生成结构化的项目理解
 // 内部调用 generateObject + Zod schema，确保输出格式正确
-import { createOpenAI } from "@ai-sdk/openai";
 import { generateObject } from "ai";
 import { projectUnderstandingSchema, type ProjectUnderstanding } from "../schemas";
 import { ANALYSIS_PROMPT } from "../prompts";
+import { model } from "../client";
 import type { GitHubRepoData } from "../../github/analyzer";
-
-// 创建模型实例（与 Orchestrator 共用配置，后续可独立切换模型）
-const openai = createOpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: process.env.OPENAI_BASE_URL,
-});
-
-const model = openai.chat(process.env.OPENAI_MODEL || "gpt-5.2");
 
 // Subagent 输入：可以是 GitHub 数据、文档、描述的组合
 interface AnalysisInput {

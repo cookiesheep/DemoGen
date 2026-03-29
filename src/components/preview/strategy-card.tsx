@@ -3,6 +3,7 @@
 "use client";
 
 import type { DisplayStrategy } from "@/lib/ai/schemas";
+import { Section } from "@/components/ui/section";
 import {
   Target,
   Users,
@@ -134,23 +135,3 @@ export function StrategyCard({ data }: StrategyCardProps) {
   );
 }
 
-// 通用 Section 组件
-function Section({
-  icon: Icon,
-  title,
-  children,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-lg border border-border bg-card p-3">
-      <div className="flex items-center gap-2 mb-2">
-        <Icon className="h-4 w-4 text-muted-foreground" />
-        <h3 className="text-sm font-medium">{title}</h3>
-      </div>
-      {children}
-    </div>
-  );
-}

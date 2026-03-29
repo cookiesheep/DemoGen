@@ -241,7 +241,7 @@ export function InputArea() {
             value={githubUrl}
             onChange={(e) => {
               setGithubUrl(e.target.value);
-              setError(null);
+              if (error) setError(null);
             }}
             placeholder="粘贴 GitHub 链接（可选）"
             className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
@@ -260,7 +260,7 @@ export function InputArea() {
           value={description}
           onChange={(e) => {
             setDescription(e.target.value);
-            setError(null);
+            if (error) setError(null);
           }}
           placeholder="描述你的项目（可选）—— 做了什么、用了什么技术、给谁用..."
           className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none placeholder:text-muted-foreground resize-none min-h-[60px] max-h-[120px] focus:border-primary/50"

@@ -1,21 +1,13 @@
 // Agent API 入口 — Orchestrator Agent 的后端接口
 // 使用 AI SDK v6 的 streamText + tools 实现 Agent 循环
-import { createOpenAI } from "@ai-sdk/openai";
 import { streamText, tool, UIMessage, stepCountIs, convertToModelMessages } from "ai";
 import { z } from "zod";
 import { parseGitHubUrl, analyzeRepo } from "@/lib/github/analyzer";
 import { analyzeProject } from "@/lib/ai/subagents/analysis";
 import { planStrategy } from "@/lib/ai/subagents/strategy";
 import { ORCHESTRATOR_PROMPT } from "@/lib/ai/prompts";
-
-// 创建 OpenAI 兼容的模型实例（支持 DeepSeek / 第三方中转等）
-// 注意：必须用 openai.chat() 而不是 openai()，后者会走 Responses API
-const openai = createOpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: process.env.OPENAI_BASE_URL,
-});
-
-const model = openai.chat(process.env.OPENAI_MODEL || "gpt-5.2");
+import { model } from "@/lib/ai/client";
+import type { ProjectType } from "@/lib/ai/schemas";
 
 export async function POST(req: Request) {
   // 从请求中获取消息列表（AI SDK v6 格式）
@@ -166,7 +158,7 @@ export async function POST(req: Request) {
               projectUnderstanding: {
                 name: projectName,
                 summary: projectSummary,
-                type: projectType as "web-app" | "api-service" | "cli-tool" | "data-viz" | "ai-service" | "agent-workflow" | "library" | "algorithm" | "mobile-app" | "other",
+                type: projectType as ProjectType,
                 targetUsers,
                 coreFeatures,
                 highlights,

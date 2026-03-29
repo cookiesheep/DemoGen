@@ -1,6 +1,5 @@
 // Strategy Subagent — 根据项目理解和展示场景，生成展示策略
 // 使用 generateObject + Zod schema 确保输出格式正确
-import { createOpenAI } from "@ai-sdk/openai";
 import { generateObject } from "ai";
 import {
   displayStrategySchema,
@@ -9,14 +8,7 @@ import {
   type Scenario,
 } from "../schemas";
 import { STRATEGY_PROMPT } from "../prompts";
-
-// 创建模型实例
-const openai = createOpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: process.env.OPENAI_BASE_URL,
-});
-
-const model = openai.chat(process.env.OPENAI_MODEL || "gpt-5.2");
+import { model } from "../client";
 
 // 场景中文名映射
 const SCENARIO_LABELS: Record<string, Scenario> = {
