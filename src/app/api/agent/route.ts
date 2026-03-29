@@ -14,7 +14,7 @@
 // 这让弱模型也能可靠地工作，因为"调用唯一可用的工具"远比
 // "从 9 个工具中选对的那个"简单得多。
 
-import { streamText, tool, UIMessage, stepCountIs, convertToModelMessages } from "ai";
+import { streamText, tool, UIMessage, stepCountIs, convertToModelMessages, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { z } from "zod";
 import { parseGitHubUrl, analyzeRepo } from "@/lib/github/analyzer";
 import { analyzeProject } from "@/lib/ai/subagents/analysis";
@@ -330,31 +330,77 @@ function getToolsForState(state: string): ToolSet {
 export async function POST(req: Request) {
   const { messages }: { messages: UIMessage[] } = await req.json();
 
-  // ===== 调试日志：打印消息中的 part 结构 =====
+  // 调试日志
   for (const msg of messages) {
     if (msg.role === "assistant") {
       for (const part of msg.parts) {
         if (typeof part.type === "string" && part.type.startsWith("tool-")) {
           const p = part as Record<string, unknown>;
           console.log("[DEBUG] tool part:", JSON.stringify({
-            type: p.type,
-            state: p.state,
-            hasOutput: p.output !== undefined,
+            type: p.type, state: p.state, hasOutput: p.output !== undefined,
           }));
         }
       }
     }
   }
 
-  // Step 1: 从消息历史推导当前状态
+  // Step 1: 推导状态
   const state = deriveState(messages);
   console.log("[DEBUG] derived state:", state);
 
-  // Step 2: 获取该状态的 prompt 和工具集
+  // ===== 固定参数的前端工具：跳过 LLM，代码直接发起工具调用 =====
+  //
+  // 原理：askUserChoice 和 confirmAssets 是前端工具（无 execute）。
+  // 它们的参数在某些状态下是完全固定的（比如场景选择的 5 个选项）。
+  // 如果让 LLM 填参数，它经常填错（自己编问题和选项）。
+  //
+  // 解决：直接用 createUIMessageStream 构造一个包含工具调用的响应，
+  // 发送 "tool-input-available" chunk 给前端。前端会渲染对应的组件
+  // （ChoiceSelector / AssetSelector），和正常工具调用完全一样。
+  //
+  // 这是状态机架构的另一个优势：某些步骤完全不需要 LLM 参与。
+
+  if (state === "awaiting_scenario") {
+    // 场景选择的参数是固定的，不需要 LLM
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        writer.write({
+          type: "tool-input-available",
+          toolCallId: `call-scenario-${Date.now()}`,
+          toolName: "askUserChoice",
+          input: {
+            question: "请选择你的展示场景：",
+            options: ["课程答辩", "面试展示", "开源推广", "产品发布", "团队汇报"],
+          },
+        });
+      },
+    });
+    return createUIMessageStreamResponse({ stream });
+  }
+
+  if (state === "awaiting_assets") {
+    // 从消息历史中提取 planStrategy 的结果，拿到 recommendedAssets
+    const recommendedAssets = extractRecommendedAssets(messages);
+    if (recommendedAssets.length > 0) {
+      const stream = createUIMessageStream({
+        execute: async ({ writer }) => {
+          writer.write({
+            type: "tool-input-available",
+            toolCallId: `call-assets-${Date.now()}`,
+            toolName: "confirmAssets",
+            input: { recommendedAssets },
+          });
+        },
+      });
+      return createUIMessageStreamResponse({ stream });
+    }
+    // 如果没找到推荐资产，fallthrough 让 LLM 处理
+  }
+
+  // ===== 需要 LLM 的状态：走 streamText =====
   let systemPrompt = STATE_PROMPTS[state];
   const tools = getToolsForState(state);
 
-  // generating 状态下，告诉 LLM 还需要生成哪些资产
   if (state === "generating") {
     const remaining = getRemainingAssets(messages);
     const assetLabels: Record<string, string> = {
@@ -366,29 +412,7 @@ export async function POST(req: Request) {
     systemPrompt += `\n还需要生成：${remainingList}。`;
   }
 
-  // Step 3: 调用 streamText
   const modelMessages = await convertToModelMessages(messages);
-
-  // ===== 关键控制：stepCountIs + toolChoice =====
-  //
-  // stepCountIs(N) 控制"LLM 可以执行几轮工具调用"。
-  // 一个 step = LLM 生成 → 工具执行 → 结果返回。
-  //
-  // 如果 stepCountIs(3)，工具完成后 LLM 还有 2 步可用，
-  // 它会利用这些步骤输出大段文字（因为没有别的工具可调了）。
-  //
-  // 修复：
-  // - 单工具状态用 stepCountIs(1)：工具完成后直接停，LLM 没机会输出文字
-  // - generating 用 stepCountIs(5)：需要连续调用多个生成工具
-  // - editing 用 stepCountIs(2)：调 reviseAsset + 说一句"已修改"
-  //
-  // toolChoice 控制"LLM 是否必须调用工具"。
-  // - "required"：强制调工具，不能只输出文字
-  // - "auto"：LLM 自己决定（editing 状态需要，因为用户可能只是聊天）
-  //
-  // 两者结合：analyzing 状态 = stepCountIs(1) + toolChoice:"required"
-  // → LLM 被迫调 analyzeProject，调完后直接停。零废话。
-
   const stateConfig = STATE_STREAM_CONFIG[state];
 
   const result = streamText({
@@ -401,6 +425,28 @@ export async function POST(req: Request) {
   });
 
   return result.toUIMessageStreamResponse();
+}
+
+// 从消息历史中提取 planStrategy 返回的 recommendedAssets
+function extractRecommendedAssets(messages: UIMessage[]): { type: string; label: string; reason: string }[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (const part of msg.parts) {
+      const p = part as Record<string, unknown>;
+      if (
+        typeof p.type === "string" &&
+        p.type === "tool-planStrategy" &&
+        p.output
+      ) {
+        const output = p.output as { success?: boolean; data?: { recommendedAssets?: { type: string; label: string; reason: string }[] } };
+        if (output.success && output.data?.recommendedAssets) {
+          return output.data.recommendedAssets;
+        }
+      }
+    }
+  }
+  return [];
 }
 
 // 每个状态的 streamText 配置
