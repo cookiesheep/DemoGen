@@ -401,6 +401,11 @@ export async function POST(req: Request) {
   let systemPrompt = STATE_PROMPTS[state];
   const tools = getToolsForState(state);
 
+  // generating 状态：动态计算 maxSteps = 还需生成的资产数量
+  // 这样 LLM 生成完所有资产后正好用完步数，不会多余地重复调用
+  let maxSteps = STATE_STREAM_CONFIG[state].maxSteps;
+  const toolChoice = STATE_STREAM_CONFIG[state].toolChoice;
+
   if (state === "generating") {
     const remaining = getRemainingAssets(messages);
     const assetLabels: Record<string, string> = {
@@ -409,19 +414,21 @@ export async function POST(req: Request) {
       onepager: "一页纸(generateOnePager)",
     };
     const remainingList = remaining.map((a) => assetLabels[a] || a).join("、");
-    systemPrompt += `\n还需要生成：${remainingList}。`;
+    systemPrompt += `\n还需要生成：${remainingList}。每个只生成一次，不要重复。`;
+    // 精确控制步数：还有几个资产就给几步
+    maxSteps = remaining.length;
+    console.log("[DEBUG] generating remaining:", remaining, "maxSteps:", maxSteps);
   }
 
   const modelMessages = await convertToModelMessages(messages);
-  const stateConfig = STATE_STREAM_CONFIG[state];
 
   const result = streamText({
     model,
     system: systemPrompt,
     messages: modelMessages,
     tools,
-    stopWhen: stepCountIs(stateConfig.maxSteps),
-    toolChoice: stateConfig.toolChoice,
+    stopWhen: stepCountIs(maxSteps),
+    toolChoice,
   });
 
   return result.toUIMessageStreamResponse();
@@ -465,5 +472,6 @@ const STATE_STREAM_CONFIG: Record<
   // 生成资产：强制调工具，可连续调多个（讲稿+PPT+一页纸）
   generating:       { maxSteps: 5, toolChoice: "required" },
   // 编辑模式：用户可能聊天也可能要修改，所以 auto
-  editing:          { maxSteps: 2, toolChoice: "auto" },
+  // maxSteps=1 确保调完 reviseAsset 后立即停止，不输出废话
+  editing:          { maxSteps: 1, toolChoice: "auto" },
 };
