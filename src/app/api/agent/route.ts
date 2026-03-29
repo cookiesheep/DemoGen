@@ -330,8 +330,25 @@ function getToolsForState(state: string): ToolSet {
 export async function POST(req: Request) {
   const { messages }: { messages: UIMessage[] } = await req.json();
 
+  // ===== 调试日志：打印消息中的 part 结构 =====
+  for (const msg of messages) {
+    if (msg.role === "assistant") {
+      for (const part of msg.parts) {
+        if (typeof part.type === "string" && part.type.startsWith("tool-")) {
+          const p = part as Record<string, unknown>;
+          console.log("[DEBUG] tool part:", JSON.stringify({
+            type: p.type,
+            state: p.state,
+            hasOutput: p.output !== undefined,
+          }));
+        }
+      }
+    }
+  }
+
   // Step 1: 从消息历史推导当前状态
   const state = deriveState(messages);
+  console.log("[DEBUG] derived state:", state);
 
   // Step 2: 获取该状态的 prompt 和工具集
   let systemPrompt = STATE_PROMPTS[state];

@@ -51,26 +51,25 @@ function extractCompletedToolCalls(messages: UIMessage[]): CompletedToolCall[] {
   const completed: CompletedToolCall[] = [];
 
   for (const message of messages) {
-    // 只看 assistant 消息（工具调用都在 assistant 消息中）
     if (message.role !== "assistant") continue;
 
     for (const part of message.parts) {
-      // AI SDK v6 的 UIMessage part 中，工具调用类型为 "tool-invocation"
-      // toolInvocation 包含 toolName, state, result 等字段
-      if (
-        part.type === "tool-invocation" &&
-        "toolInvocation" in part
-      ) {
-        const invocation = part.toolInvocation as {
-          toolName: string;
-          state: string;
-          result?: Record<string, unknown>;
-        };
-        // state === "result" 表示工具已执行完成且有返回值
-        if (invocation.state === "result" && invocation.result) {
+      // AI SDK v6 + assistant-ui 的 UIMessage part 格式：
+      //   type: "tool-{toolName}"  (如 "tool-analyzeProject")
+      //   state: "output-available" (已完成) / "call" (调用中)
+      //   output: { ... }  (工具返回值)
+      //
+      // 注意：不是 "tool-invocation" + 嵌套的 toolInvocation 对象！
+      // type 本身包含工具名，字段直接在 part 上。
+      const partType = part.type as string;
+      if (partType.startsWith("tool-")) {
+        const p = part as Record<string, unknown>;
+        // 检查工具是否已完成（有 output 字段）
+        if (p.output !== undefined && p.output !== null) {
+          const toolName = partType.replace("tool-", "");
           completed.push({
-            toolName: invocation.toolName,
-            result: invocation.result,
+            toolName,
+            result: p.output as Record<string, unknown>,
           });
         }
       }
