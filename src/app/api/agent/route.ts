@@ -8,6 +8,7 @@ import { planStrategy } from "@/lib/ai/subagents/strategy";
 import { generateScript } from "@/lib/ai/subagents/script-writer";
 import { generatePPT } from "@/lib/ai/subagents/ppt-architect";
 import { generateOnePager } from "@/lib/ai/subagents/onepager-designer";
+import { reviseScript, revisePpt, reviseOnePager } from "@/lib/ai/revise";
 import { ORCHESTRATOR_PROMPT } from "@/lib/ai/prompts";
 import { model } from "@/lib/ai/client";
 import type { ProjectType } from "@/lib/ai/schemas";
@@ -392,6 +393,71 @@ export async function POST(req: Request) {
           } catch (err) {
             return {
               error: `One-pager 生成失败: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        },
+      }),
+
+      // 资产修改工具：根据用户指令修改已生成的资产
+      reviseAsset: tool({
+        description:
+          "根据用户的修改指令，修改已生成的资产（讲稿/PPT大纲/一页纸）。用户说'改讲稿第三段'或'PPT第二页加个要点'时调用此工具。",
+        inputSchema: z.object({
+          assetType: z
+            .enum(["script", "ppt", "onepager"])
+            .describe("要修改的资产类型"),
+          currentContent: z
+            .string()
+            .describe("当前资产的完整内容（讲稿是 Markdown，PPT/One-pager 是 JSON）"),
+          instructions: z
+            .string()
+            .describe("用户的修改指令，如'把第三段改成更简洁的版本'"),
+        }),
+        execute: async ({ assetType, currentContent, instructions }) => {
+          try {
+            switch (assetType) {
+              case "script": {
+                const revised = await reviseScript(currentContent, instructions);
+                return {
+                  success: true,
+                  assetType,
+                  data: revised,
+                  summary: {
+                    assetType: "script",
+                    charCount: revised.length,
+                  },
+                };
+              }
+              case "ppt": {
+                const currentData = JSON.parse(currentContent);
+                const revised = await revisePpt(currentData, instructions);
+                return {
+                  success: true,
+                  assetType,
+                  data: revised,
+                  summary: {
+                    assetType: "ppt",
+                    slideCount: revised.totalSlides,
+                  },
+                };
+              }
+              case "onepager": {
+                const currentData = JSON.parse(currentContent);
+                const revised = await reviseOnePager(currentData, instructions);
+                return {
+                  success: true,
+                  assetType,
+                  data: revised,
+                  summary: {
+                    assetType: "onepager",
+                    projectName: revised.projectName,
+                  },
+                };
+              }
+            }
+          } catch (err) {
+            return {
+              error: `资产修改失败: ${err instanceof Error ? err.message : String(err)}`,
             };
           }
         },

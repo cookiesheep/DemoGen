@@ -16,6 +16,7 @@ import {
   FileSpreadsheet,
   Clock,
   Package,
+  PenLine,
 } from "lucide-react";
 import { usePreview } from "../preview/preview-context";
 import type { ProjectUnderstanding, DisplayStrategy, PptOutline, OnePager } from "@/lib/ai/schemas";
@@ -168,6 +169,19 @@ function getRunningLines(
       ];
     }
 
+    case "reviseAsset": {
+      const typeLabels: Record<string, string> = {
+        script: "讲稿",
+        ppt: "PPT 大纲",
+        onepager: "一页纸",
+      };
+      const assetLabel = typeLabels[String(args.assetType)] || "资产";
+      return [
+        { icon: "✏️", text: `修改${assetLabel}` },
+        { icon: "🤖", text: `按指令重新生成：${String(args.instructions || "").slice(0, 40)}${String(args.instructions || "").length > 40 ? "..." : ""}` },
+      ];
+    }
+
     default:
       return [];
   }
@@ -204,6 +218,18 @@ function CompleteSummary({
       case "generateOnePager":
         preview.setOnePager(result.data as OnePager);
         break;
+      case "reviseAsset": {
+        // reviseAsset 返回 { assetType, data }，根据 assetType 推送到对应位置
+        const revised = result as ToolResult & { assetType?: string };
+        if (revised.assetType === "script") {
+          preview.setScriptContent(revised.data as string);
+        } else if (revised.assetType === "ppt") {
+          preview.setPptOutline(revised.data as PptOutline);
+        } else if (revised.assetType === "onepager") {
+          preview.setOnePager(revised.data as OnePager);
+        }
+        break;
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toolName, result]);
@@ -312,6 +338,17 @@ function getCompleteSummaryLines(
       ];
     }
 
+    case "reviseAsset": {
+      const s = summary as { assetType?: string; charCount?: number; slideCount?: number; projectName?: string };
+      const typeLabels: Record<string, string> = { script: "讲稿", ppt: "PPT 大纲", onepager: "一页纸" };
+      const label = typeLabels[s.assetType || ""] || "资产";
+      const detail = s.charCount ? `${s.charCount} 字` : s.slideCount ? `${s.slideCount} 页` : "";
+      return [
+        { icon: "✏️", text: `${label}已修改`, highlight: true },
+        ...(detail ? [{ icon: "📏", text: detail }] : []),
+      ];
+    }
+
     default:
       return [];
   }
@@ -366,5 +403,10 @@ const TOOL_CONFIGS: Record<
     label: "确认资产",
     icon: Package,
     completeTip: "用户已确认资产选择",
+  },
+  reviseAsset: {
+    label: "修改资产",
+    icon: PenLine,
+    completeTip: "资产已修改，请查看右侧",
   },
 };
