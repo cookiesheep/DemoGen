@@ -81,21 +81,28 @@ export function PreviewPanel() {
       )}
 
       {/* 内容区域 */}
-      <div className="flex-1 overflow-y-auto">
-        {activeAsset === "project" && preview.projectUnderstanding && (
-          <ProjectCard data={preview.projectUnderstanding} />
-        )}
-        {activeAsset === "strategy" && preview.displayStrategy && (
-          <StrategyCard data={preview.displayStrategy} />
-        )}
+      <div className="flex-1 overflow-hidden">
+        {/* 讲稿用 flex 布局占满高度（编辑模式需要） */}
         {activeAsset === "script" && preview.scriptContent && (
           <ScriptPreview content={preview.scriptContent} />
         )}
-        {activeAsset === "ppt" && preview.pptOutline && (
-          <PptPreview data={preview.pptOutline} />
-        )}
-        {activeAsset === "onepager" && preview.onePager && (
-          <OnePagerPreview data={preview.onePager} />
+
+        {/* 其他资产用滚动容器 */}
+        {activeAsset !== "script" && (
+          <div className="h-full overflow-y-auto">
+            {activeAsset === "project" && preview.projectUnderstanding && (
+              <ProjectCard data={preview.projectUnderstanding} />
+            )}
+            {activeAsset === "strategy" && preview.displayStrategy && (
+              <StrategyCard data={preview.displayStrategy} />
+            )}
+            {activeAsset === "ppt" && preview.pptOutline && (
+              <PptPreview data={preview.pptOutline} />
+            )}
+            {activeAsset === "onepager" && preview.onePager && (
+              <OnePagerPreview data={preview.onePager} />
+            )}
+          </div>
         )}
       </div>
     </div>
