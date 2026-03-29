@@ -3,24 +3,27 @@
 "use client";
 
 import { createContext, useContext, useState, useCallback } from "react";
-import type { ProjectUnderstanding, DisplayStrategy } from "@/lib/ai/schemas";
+import type { ProjectUnderstanding, DisplayStrategy, PptOutline, OnePager } from "@/lib/ai/schemas";
 
 // 预览面板可展示的资产类型
 export type AssetType = "project" | "strategy" | "script" | "ppt" | "onepager";
 
 interface PreviewState {
-  // 当前活跃的资产类型（决定右侧显示什么）
   activeAsset: AssetType | null;
-  // 各类资产的数据
   projectUnderstanding: ProjectUnderstanding | null;
   displayStrategy: DisplayStrategy | null;
-  // 后续扩展：script, ppt, onepager...
+  scriptContent: string | null;        // 讲稿 Markdown 文本
+  pptOutline: PptOutline | null;       // PPT 大纲结构化数据
+  onePager: OnePager | null;           // One-pager 结构化数据
 }
 
 interface PreviewContextValue extends PreviewState {
   setActiveAsset: (asset: AssetType) => void;
   setProjectUnderstanding: (data: ProjectUnderstanding) => void;
   setDisplayStrategy: (data: DisplayStrategy) => void;
+  setScriptContent: (data: string) => void;
+  setPptOutline: (data: PptOutline) => void;
+  setOnePager: (data: OnePager) => void;
 }
 
 const PreviewContext = createContext<PreviewContextValue | null>(null);
@@ -30,6 +33,9 @@ export function PreviewProvider({ children }: { children: React.ReactNode }) {
     activeAsset: null,
     projectUnderstanding: null,
     displayStrategy: null,
+    scriptContent: null,
+    pptOutline: null,
+    onePager: null,
   });
 
   const setActiveAsset = useCallback((asset: AssetType) => {
@@ -58,6 +64,39 @@ export function PreviewProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const setScriptContent = useCallback(
+    (data: string) => {
+      setState((prev) => ({
+        ...prev,
+        scriptContent: data,
+        activeAsset: "script",
+      }));
+    },
+    []
+  );
+
+  const setPptOutline = useCallback(
+    (data: PptOutline) => {
+      setState((prev) => ({
+        ...prev,
+        pptOutline: data,
+        activeAsset: "ppt",
+      }));
+    },
+    []
+  );
+
+  const setOnePager = useCallback(
+    (data: OnePager) => {
+      setState((prev) => ({
+        ...prev,
+        onePager: data,
+        activeAsset: "onepager",
+      }));
+    },
+    []
+  );
+
   return (
     <PreviewContext.Provider
       value={{
@@ -65,6 +104,9 @@ export function PreviewProvider({ children }: { children: React.ReactNode }) {
         setActiveAsset,
         setProjectUnderstanding,
         setDisplayStrategy,
+        setScriptContent,
+        setPptOutline,
+        setOnePager,
       }}
     >
       {children}

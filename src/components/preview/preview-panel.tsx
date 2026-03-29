@@ -6,29 +6,30 @@
 import { usePreview, type AssetType } from "./preview-context";
 import { ProjectCard } from "./project-card";
 import { StrategyCard } from "./strategy-card";
+import { ScriptPreview } from "./script-preview";
+import { PptPreview } from "./ppt-preview";
+import { OnePagerPreview } from "./onepager-preview";
 
 // 资产标签配置
 const ASSET_TABS: { key: AssetType; label: string; icon: string }[] = [
   { key: "project", label: "项目理解", icon: "📋" },
   { key: "strategy", label: "展示策略", icon: "🎯" },
-  // 后续扩展：
-  // { key: "script", label: "讲稿", icon: "📝" },
-  // { key: "ppt", label: "PPT", icon: "📊" },
-  // { key: "onepager", label: "One-pager", icon: "📄" },
+  { key: "script", label: "讲稿", icon: "📝" },
+  { key: "ppt", label: "PPT 大纲", icon: "📊" },
+  { key: "onepager", label: "一页纸", icon: "📄" },
 ];
 
 export function PreviewPanel() {
-  const {
-    activeAsset,
-    projectUnderstanding,
-    displayStrategy,
-    setActiveAsset,
-  } = usePreview();
+  const preview = usePreview();
+  const { activeAsset, setActiveAsset } = preview;
 
   // 判断哪些资产已经生成了
   const availableAssets = ASSET_TABS.filter((tab) => {
-    if (tab.key === "project") return projectUnderstanding !== null;
-    if (tab.key === "strategy") return displayStrategy !== null;
+    if (tab.key === "project") return preview.projectUnderstanding !== null;
+    if (tab.key === "strategy") return preview.displayStrategy !== null;
+    if (tab.key === "script") return preview.scriptContent !== null;
+    if (tab.key === "ppt") return preview.pptOutline !== null;
+    if (tab.key === "onepager") return preview.onePager !== null;
     return false;
   });
 
@@ -81,11 +82,20 @@ export function PreviewPanel() {
 
       {/* 内容区域 */}
       <div className="flex-1 overflow-y-auto">
-        {activeAsset === "project" && projectUnderstanding && (
-          <ProjectCard data={projectUnderstanding} />
+        {activeAsset === "project" && preview.projectUnderstanding && (
+          <ProjectCard data={preview.projectUnderstanding} />
         )}
-        {activeAsset === "strategy" && displayStrategy && (
-          <StrategyCard data={displayStrategy} />
+        {activeAsset === "strategy" && preview.displayStrategy && (
+          <StrategyCard data={preview.displayStrategy} />
+        )}
+        {activeAsset === "script" && preview.scriptContent && (
+          <ScriptPreview content={preview.scriptContent} />
+        )}
+        {activeAsset === "ppt" && preview.pptOutline && (
+          <PptPreview data={preview.pptOutline} />
+        )}
+        {activeAsset === "onepager" && preview.onePager && (
+          <OnePagerPreview data={preview.onePager} />
         )}
       </div>
     </div>

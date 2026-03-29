@@ -12,6 +12,7 @@ import { SendHorizontal } from "lucide-react";
 import { ToolCallDisplay } from "./tool-call-display";
 import { ChoiceSelector } from "./choice-selector";
 import { InputArea } from "./input-area";
+import { MarkdownText } from "./markdown-text";
 
 export function Thread() {
   // 读取 thread 状态，判断是否已有消息（用于决定显示哪个输入区）
@@ -68,6 +69,8 @@ function AssistantMessage() {
       <div className="max-w-[90%]">
         <MessagePrimitive.Content
           components={{
+            // 使用 Markdown 渲染 Assistant 的文本内容
+            Text: MarkdownText,
             tools: {
               // askUserChoice 工具用专门的选项按钮组件渲染
               by_name: {

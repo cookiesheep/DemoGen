@@ -1,42 +1,60 @@
-// 工具调用展示组件 — 显示 Agent 的工具调用状态（running/complete/error）
-// 让用户能看到 Agent 正在做什么，类似 Claude Code 的工具调用展示
-// 特定工具（如 analyzeProject）完成时，会将结果推送到 PreviewContext
+// 工具调用展示组件 — 每个工具调用显示为人类可读的行为卡片
+// 运行中：显示正在做什么（中文描述 + 动画）
+// 完成后：显示关键发现摘要 + 推送数据到右侧预览面板
 "use client";
 
 import { useEffect } from "react";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
-import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  Search,
+  Target,
+  FileText,
+  LayoutGrid,
+  FileSpreadsheet,
+  Clock,
+} from "lucide-react";
 import { usePreview } from "../preview/preview-context";
-import type { ProjectUnderstanding, DisplayStrategy } from "@/lib/ai/schemas";
+import type { ProjectUnderstanding, DisplayStrategy, PptOutline, OnePager } from "@/lib/ai/schemas";
+
+// 工具结果的通用类型
+interface ToolResult {
+  success?: boolean;
+  data?: unknown;
+  error?: string;
+  summary?: Record<string, unknown>;
+}
 
 // 通用工具调用展示 — 作为 MessagePrimitive.Content 的 tools.Fallback 组件
 export function ToolCallDisplay(props: ToolCallMessagePartProps) {
-  const { toolName, args, result, status } = props;
+  const { toolName, status } = props;
+  const args = (props.args ?? {}) as Record<string, unknown>;
+  const result = props.result as ToolResult | undefined;
   const isRunning = status.type === "running";
   const isComplete = status.type === "complete";
   const isError = status.type === "incomplete";
+  const toolConfig = TOOL_CONFIGS[toolName];
 
   return (
     <div className="my-2 rounded-lg border border-border bg-muted/30 text-sm overflow-hidden">
-      {/* 工具调用头部 — 名称 + 状态 */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50">
-        {/* 状态图标 */}
+      {/* 头部：图标 + 工具名 + 状态 */}
+      <div className="flex items-center gap-2 px-3 py-2">
         {isRunning && (
-          <Loader2 className="h-3.5 w-3.5 text-blue-500 animate-spin" />
+          <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />
         )}
         {isComplete && (
-          <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+          <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />
         )}
         {isError && (
-          <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+          <AlertCircle className="h-4 w-4 text-red-500 shrink-0" />
         )}
 
-        {/* 工具名称 */}
-        <span className="font-mono text-xs font-medium">
-          {getToolDisplayName(toolName)}
+        <span className="font-medium text-xs">
+          {toolConfig?.label || toolName}
         </span>
 
-        {/* 状态文字 */}
         <span className="text-xs text-muted-foreground ml-auto">
           {isRunning && "执行中..."}
           {isComplete && "完成"}
@@ -44,127 +62,303 @@ export function ToolCallDisplay(props: ToolCallMessagePartProps) {
         </span>
       </div>
 
-      {/* 工具参数 — 折叠显示 */}
-      {args && Object.keys(args as Record<string, unknown>).length > 0 && (
-        <div className="px-3 py-1.5 text-xs text-muted-foreground border-b border-border/50">
-          {formatArgs(args as Record<string, unknown>)}
-        </div>
+      {/* 运行中：显示人类可读的行为描述 */}
+      {isRunning && (
+        <RunningDescription toolName={toolName} args={args} />
       )}
 
-      {/* 工具结果 — 完成后显示摘要 */}
+      {/* 完成后：显示摘要 + 推送到预览面板 */}
       {isComplete && result && (
-        <ToolResultSummary toolName={toolName} result={result} />
+        <CompleteSummary toolName={toolName} result={result} />
       )}
 
-      {/* 错误信息 */}
+      {/* 错误 */}
       {isError && (
-        <div className="px-3 py-2 text-xs text-red-600">
-          工具调用失败
+        <div className="px-3 py-2 text-xs text-red-600 border-t border-border/50">
+          工具调用失败，请重试
         </div>
       )}
     </div>
   );
 }
 
-// 工具结果摘要 — 根据工具类型展示不同内容，同时触发预览面板更新
-function ToolResultSummary({
+// ========== 运行中的行为描述 ==========
+// 根据工具名和参数，生成人类可读的"正在做什么"
+function RunningDescription({
+  toolName,
+  args,
+}: {
+  toolName: string;
+  args: Record<string, unknown>;
+}) {
+  const lines = getRunningLines(toolName, args);
+  if (lines.length === 0) return null;
+
+  return (
+    <div className="px-3 py-2 border-t border-border/50 space-y-1">
+      {lines.map((line, i) => (
+        <div key={i} className="flex items-center gap-2 text-xs text-muted-foreground">
+          {/* 树状连接线 */}
+          <span className="text-border shrink-0">
+            {i === lines.length - 1 ? "└─" : "├─"}
+          </span>
+          <span>{line.icon}</span>
+          <span>{line.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// 根据工具名和参数，返回运行时的描述行
+function getRunningLines(
+  toolName: string,
+  args: Record<string, unknown>
+): { icon: string; text: string }[] {
+  switch (toolName) {
+    case "analyzeProject": {
+      const lines: { icon: string; text: string }[] = [];
+      if (args.githubUrl) {
+        // 从 URL 中提取 owner/repo
+        const match = String(args.githubUrl).match(/github\.com\/([^/]+\/[^/]+)/);
+        const repoName = match ? match[1] : "仓库";
+        lines.push({ icon: "📡", text: `读取 GitHub 仓库 ${repoName}` });
+      }
+      if (args.documents && Array.isArray(args.documents) && args.documents.length > 0) {
+        lines.push({ icon: "📄", text: `分析 ${args.documents.length} 份上传文档` });
+      }
+      if (args.description) {
+        lines.push({ icon: "💬", text: "解析用户项目描述" });
+      }
+      lines.push({ icon: "🤖", text: "AI 生成结构化项目理解" });
+      return lines;
+    }
+
+    case "planStrategy": {
+      const scenario = args.scenario || args.scenarioLabel || "展示";
+      return [
+        { icon: "🎯", text: `场景：${scenario}` },
+        { icon: "👥", text: "分析目标观众" },
+        { icon: "📋", text: "规划展示结构与时间分配" },
+      ];
+    }
+
+    case "generateScript": {
+      const label = args.scenarioLabel || "展示";
+      const duration = args.totalDuration || "";
+      return [
+        { icon: "🎤", text: `撰写${label}讲稿${duration ? `（${duration}）` : ""}` },
+        { icon: "✍️", text: "按展示结构逐段生成" },
+      ];
+    }
+
+    case "generatePPT": {
+      return [
+        { icon: "📊", text: "设计 PPT 页面结构" },
+        { icon: "📝", text: "为每页撰写要点和演讲备注" },
+      ];
+    }
+
+    case "generateOnePager": {
+      const name = args.projectName || "项目";
+      return [
+        { icon: "📄", text: `为 ${name} 生成一页纸` },
+        { icon: "✨", text: "提炼核心价值和功能亮点" },
+      ];
+    }
+
+    default:
+      return [];
+  }
+}
+
+// ========== 完成后的摘要 ==========
+// 显示工具完成后的关键信息，同时推送数据到 PreviewContext
+function CompleteSummary({
   toolName,
   result,
 }: {
   toolName: string;
-  result: unknown;
+  result: ToolResult;
 }) {
   const preview = usePreview();
 
-  // 当工具完成时，将结果推送到预览面板
+  // 推送结果到右侧预览面板
   useEffect(() => {
-    if (!result) return;
+    if (!result?.success || !result.data) return;
 
-    if (toolName === "analyzeProject") {
-      const res = result as { success?: boolean; data?: ProjectUnderstanding; error?: string };
-      if (res.success && res.data) {
-        preview.setProjectUnderstanding(res.data);
-      }
-    } else if (toolName === "planStrategy") {
-      const res = result as { success?: boolean; data?: DisplayStrategy; error?: string };
-      if (res.success && res.data) {
-        preview.setDisplayStrategy(res.data);
-      }
+    switch (toolName) {
+      case "analyzeProject":
+        preview.setProjectUnderstanding(result.data as ProjectUnderstanding);
+        break;
+      case "planStrategy":
+        preview.setDisplayStrategy(result.data as DisplayStrategy);
+        break;
+      case "generateScript":
+        preview.setScriptContent(result.data as string);
+        break;
+      case "generatePPT":
+        preview.setPptOutline(result.data as PptOutline);
+        break;
+      case "generateOnePager":
+        preview.setOnePager(result.data as OnePager);
+        break;
     }
-    // 只在 result 变化时触发，preview 的 setter 是 stable 的
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toolName, result]);
 
-  // analyzeProject 完成后的简要提示
-  if (toolName === "analyzeProject") {
-    const res = result as { success?: boolean; data?: ProjectUnderstanding; error?: string };
-    if (res.error) {
-      return (
-        <div className="px-3 py-2 text-xs text-red-600">{res.error}</div>
-      );
-    }
-    if (res.success && res.data) {
-      return (
-        <div className="px-3 py-2 text-xs text-green-700">
-          已生成项目理解卡片 — 请在右侧查看
-        </div>
-      );
-    }
+  // 错误显示
+  if (result.error) {
+    return (
+      <div className="px-3 py-2 text-xs text-red-600 border-t border-border/50">
+        {result.error}
+      </div>
+    );
   }
 
-  // planStrategy 完成后的简要提示
-  if (toolName === "planStrategy") {
-    const res = result as { success?: boolean; data?: DisplayStrategy; error?: string };
-    if (res.error) {
-      return (
-        <div className="px-3 py-2 text-xs text-red-600">{res.error}</div>
-      );
-    }
-    if (res.success && res.data) {
-      return (
-        <div className="px-3 py-2 text-xs text-green-700">
-          已生成展示策略 — 请在右侧查看
-        </div>
-      );
-    }
-  }
+  // 从 summary 生成人类可读的完成摘要
+  const summaryLines = getCompleteSummaryLines(toolName, result.summary);
 
-  // 默认：显示 JSON 格式的结果
   return (
-    <div className="px-3 py-2 text-xs">
-      {formatResult(result)}
+    <div className="px-3 py-2 border-t border-border/50 space-y-1">
+      {summaryLines.map((line, i) => (
+        <div key={i} className="flex items-center gap-2 text-xs">
+          <span className="shrink-0">{line.icon}</span>
+          <span className={line.highlight ? "text-foreground font-medium" : "text-muted-foreground"}>
+            {line.text}
+          </span>
+        </div>
+      ))}
+      {/* 引导查看右侧面板 */}
+      <div className="flex items-center gap-2 text-xs text-green-700 mt-1">
+        <span>→</span>
+        <span>{TOOL_CONFIGS[toolName]?.completeTip || "已完成，请在右侧查看"}</span>
+      </div>
     </div>
   );
 }
 
-// 工具名称映射 — 把英文工具名转为中文展示
-function getToolDisplayName(toolName: string): string {
-  const displayNames: Record<string, string> = {
-    getCurrentTime: "获取当前时间",
-    analyzeProject: "分析项目",
-    planStrategy: "规划展示策略",
-    generateScript: "生成讲稿",
-    generatePPT: "生成 PPT 大纲",
-    generateOnePager: "生成 One-pager",
-    askUserChoice: "等待用户选择",
-  };
-  return displayNames[toolName] || toolName;
-}
+// 根据工具名和 summary 数据，生成完成后的摘要行
+function getCompleteSummaryLines(
+  toolName: string,
+  summary?: Record<string, unknown>
+): { icon: string; text: string; highlight?: boolean }[] {
+  if (!summary) return [];
 
-// 格式化工具参数为可读文本
-function formatArgs(args: Record<string, unknown>): string {
-  return Object.entries(args)
-    .filter(([, v]) => v !== undefined && v !== null && v !== "")
-    .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-    .join(" | ");
-}
+  switch (toolName) {
+    case "analyzeProject": {
+      const s = summary as {
+        projectName?: string;
+        projectType?: string;
+        featureCount?: number;
+        highlightCount?: number;
+        techStackCount?: number;
+      };
+      const typeLabels: Record<string, string> = {
+        "web-app": "Web 应用",
+        "api-service": "API 服务",
+        "cli-tool": "CLI 工具",
+        "data-viz": "数据可视化",
+        "ai-service": "AI 服务",
+        "agent-workflow": "Agent 工作流",
+        library: "库/框架",
+        algorithm: "算法",
+        "mobile-app": "移动应用",
+        other: "其他",
+      };
+      return [
+        { icon: "💡", text: `项目：${s.projectName || "未知"}`, highlight: true },
+        { icon: "📦", text: `类型：${typeLabels[s.projectType || ""] || s.projectType || "未知"}` },
+        { icon: "⚙️", text: `核心功能 ${s.featureCount || 0} 个 · 技术亮点 ${s.highlightCount || 0} 个 · 技术栈 ${s.techStackCount || 0} 项` },
+      ];
+    }
 
-// 格式化工具结果
-function formatResult(result: unknown): string {
-  if (typeof result === "string") return result;
-  try {
-    return JSON.stringify(result, null, 2);
-  } catch {
-    return String(result);
+    case "planStrategy": {
+      const s = summary as {
+        scenarioLabel?: string;
+        assetCount?: number;
+        assetLabels?: string[];
+        totalDuration?: string;
+      };
+      return [
+        { icon: "🎯", text: `场景：${s.scenarioLabel || "未知"}`, highlight: true },
+        { icon: "📦", text: `推荐资产：${s.assetLabels?.join("、") || `${s.assetCount || 0} 份`}` },
+        { icon: "⏱️", text: `建议时长：${s.totalDuration || "未知"}` },
+      ];
+    }
+
+    case "generateScript": {
+      const s = summary as { charCount?: number; estimatedMinutes?: number };
+      return [
+        { icon: "📝", text: `共 ${s.charCount || 0} 字`, highlight: true },
+        { icon: "⏱️", text: `预计演讲 ${s.estimatedMinutes || 0} 分钟` },
+      ];
+    }
+
+    case "generatePPT": {
+      const s = summary as { slideCount?: number; title?: string };
+      return [
+        { icon: "📊", text: `${s.title || "PPT"}`, highlight: true },
+        { icon: "📄", text: `共 ${s.slideCount || 0} 页` },
+      ];
+    }
+
+    case "generateOnePager": {
+      const s = summary as { projectName?: string; tagline?: string };
+      return [
+        { icon: "📄", text: `${s.projectName || "项目"}`, highlight: true },
+        { icon: "✨", text: `标语：${s.tagline || ""}` },
+      ];
+    }
+
+    default:
+      return [];
   }
 }
+
+// ========== 工具配置表 ==========
+// 每个工具的中文名、图标组件、完成提示语
+const TOOL_CONFIGS: Record<
+  string,
+  {
+    label: string;
+    icon: typeof Search;
+    completeTip: string;
+  }
+> = {
+  getCurrentTime: {
+    label: "获取当前时间",
+    icon: Clock,
+    completeTip: "时间获取完成",
+  },
+  analyzeProject: {
+    label: "分析项目",
+    icon: Search,
+    completeTip: "项目理解卡片已生成，请查看右侧",
+  },
+  planStrategy: {
+    label: "规划展示策略",
+    icon: Target,
+    completeTip: "展示策略已生成，请查看右侧",
+  },
+  generateScript: {
+    label: "生成讲稿",
+    icon: FileText,
+    completeTip: "讲稿已生成，请查看右侧",
+  },
+  generatePPT: {
+    label: "生成 PPT 大纲",
+    icon: LayoutGrid,
+    completeTip: "PPT 大纲已生成，请查看右侧",
+  },
+  generateOnePager: {
+    label: "生成一页纸",
+    icon: FileSpreadsheet,
+    completeTip: "一页纸已生成，请查看右侧",
+  },
+  askUserChoice: {
+    label: "等待用户选择",
+    icon: Target,
+    completeTip: "用户已选择",
+  },
+};

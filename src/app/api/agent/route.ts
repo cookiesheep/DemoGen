@@ -5,6 +5,9 @@ import { z } from "zod";
 import { parseGitHubUrl, analyzeRepo } from "@/lib/github/analyzer";
 import { analyzeProject } from "@/lib/ai/subagents/analysis";
 import { planStrategy } from "@/lib/ai/subagents/strategy";
+import { generateScript } from "@/lib/ai/subagents/script-writer";
+import { generatePPT } from "@/lib/ai/subagents/ppt-architect";
+import { generateOnePager } from "@/lib/ai/subagents/onepager-designer";
 import { ORCHESTRATOR_PROMPT } from "@/lib/ai/prompts";
 import { model } from "@/lib/ai/client";
 import type { ProjectType } from "@/lib/ai/schemas";
@@ -82,7 +85,18 @@ export async function POST(req: Request) {
               description,
               documents,
             });
-            return { success: true, data: understanding };
+            return {
+              success: true,
+              data: understanding,
+              // summary 供前端 ToolCallDisplay 渲染人类可读的完成摘要
+              summary: {
+                projectName: understanding.name,
+                projectType: understanding.type,
+                featureCount: understanding.coreFeatures.length,
+                highlightCount: understanding.highlights.length,
+                techStackCount: understanding.techStack.length,
+              },
+            };
           } catch (err) {
             return {
               error: `AI 分析失败: ${err instanceof Error ? err.message : String(err)}`,
@@ -166,7 +180,16 @@ export async function POST(req: Request) {
                 risks,
               },
             });
-            return { success: true, data: strategy };
+            return {
+              success: true,
+              data: strategy,
+              summary: {
+                scenarioLabel: strategy.scenarioLabel,
+                assetCount: strategy.recommendedAssets.length,
+                assetLabels: strategy.recommendedAssets.map((a) => a.label),
+                totalDuration: strategy.totalDuration,
+              },
+            };
           } catch (err) {
             return {
               error: `策略规划失败: ${err instanceof Error ? err.message : String(err)}`,
@@ -174,9 +197,189 @@ export async function POST(req: Request) {
           }
         },
       }),
+
+      // 资产生成工具：生成演讲稿
+      generateScript: tool({
+        description:
+          "根据项目理解和展示策略，生成完整的演讲稿（Markdown 格式）",
+        inputSchema: z.object({
+          projectName: z.string().describe("项目名称"),
+          projectSummary: z.string().describe("项目一句话总结"),
+          projectType: z.string().describe("项目类型"),
+          targetUsers: z.string().describe("目标用户"),
+          coreFeatures: z.array(z.string()).describe("核心功能列表"),
+          highlights: z.array(z.string()).describe("技术亮点"),
+          techStack: z.array(z.string()).describe("技术栈"),
+          scenario: z.string().describe("展示场景枚举值"),
+          scenarioLabel: z.string().describe("场景中文名"),
+          audienceProfile: z.string().describe("观众画像"),
+          totalDuration: z.string().describe("建议总时长"),
+          emphasisPoints: z.array(z.string()).describe("重点方向"),
+          estimatedStructure: z.array(z.object({
+            section: z.string(),
+            duration: z.string(),
+            keyPoints: z.array(z.string()),
+          })).describe("展示结构"),
+        }),
+        execute: async (input) => {
+          try {
+            const script = await generateScript({
+              projectUnderstanding: {
+                name: input.projectName,
+                summary: input.projectSummary,
+                type: input.projectType as ProjectType,
+                targetUsers: input.targetUsers,
+                coreFeatures: input.coreFeatures,
+                highlights: input.highlights,
+                techStack: input.techStack,
+                risks: [],
+              },
+              displayStrategy: {
+                scenario: input.scenario as "course-defense" | "job-interview" | "open-source-promo" | "product-launch" | "team-report" | "custom",
+                scenarioLabel: input.scenarioLabel,
+                audienceProfile: input.audienceProfile,
+                totalDuration: input.totalDuration,
+                emphasisPoints: input.emphasisPoints,
+                estimatedStructure: input.estimatedStructure,
+                recommendedAssets: [],
+              },
+            });
+            return {
+              success: true,
+              data: script,
+              summary: {
+                charCount: script.length,
+                // 中文演讲约 250 字/分钟
+                estimatedMinutes: Math.round(script.length / 250),
+              },
+            };
+          } catch (err) {
+            return {
+              error: `讲稿生成失败: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        },
+      }),
+
+      // 资产生成工具：生成 PPT 大纲
+      generatePPT: tool({
+        description:
+          "根据项目理解和展示策略，生成 PPT 大纲（包含每页标题、要点、布局建议）",
+        inputSchema: z.object({
+          projectName: z.string().describe("项目名称"),
+          projectSummary: z.string().describe("项目一句话总结"),
+          projectType: z.string().describe("项目类型"),
+          targetUsers: z.string().describe("目标用户"),
+          coreFeatures: z.array(z.string()).describe("核心功能列表"),
+          highlights: z.array(z.string()).describe("技术亮点"),
+          techStack: z.array(z.string()).describe("技术栈"),
+          scenario: z.string().describe("展示场景枚举值"),
+          scenarioLabel: z.string().describe("场景中文名"),
+          audienceProfile: z.string().describe("观众画像"),
+          totalDuration: z.string().describe("建议总时长"),
+          emphasisPoints: z.array(z.string()).describe("重点方向"),
+          estimatedStructure: z.array(z.object({
+            section: z.string(),
+            duration: z.string(),
+            keyPoints: z.array(z.string()),
+          })).describe("展示结构"),
+        }),
+        execute: async (input) => {
+          try {
+            const ppt = await generatePPT({
+              projectUnderstanding: {
+                name: input.projectName,
+                summary: input.projectSummary,
+                type: input.projectType as ProjectType,
+                targetUsers: input.targetUsers,
+                coreFeatures: input.coreFeatures,
+                highlights: input.highlights,
+                techStack: input.techStack,
+                risks: [],
+              },
+              displayStrategy: {
+                scenario: input.scenario as "course-defense" | "job-interview" | "open-source-promo" | "product-launch" | "team-report" | "custom",
+                scenarioLabel: input.scenarioLabel,
+                audienceProfile: input.audienceProfile,
+                totalDuration: input.totalDuration,
+                emphasisPoints: input.emphasisPoints,
+                estimatedStructure: input.estimatedStructure,
+                recommendedAssets: [],
+              },
+            });
+            return {
+              success: true,
+              data: ppt,
+              summary: {
+                slideCount: ppt.totalSlides,
+                title: ppt.title,
+              },
+            };
+          } catch (err) {
+            return {
+              error: `PPT 大纲生成失败: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        },
+      }),
+
+      // 资产生成工具：生成 One-pager
+      generateOnePager: tool({
+        description:
+          "根据项目理解和展示策略，生成项目一页纸（精炼的项目介绍）",
+        inputSchema: z.object({
+          projectName: z.string().describe("项目名称"),
+          projectSummary: z.string().describe("项目一句话总结"),
+          projectType: z.string().describe("项目类型"),
+          targetUsers: z.string().describe("目标用户"),
+          coreFeatures: z.array(z.string()).describe("核心功能列表"),
+          highlights: z.array(z.string()).describe("技术亮点"),
+          techStack: z.array(z.string()).describe("技术栈"),
+          scenario: z.string().describe("展示场景枚举值"),
+          scenarioLabel: z.string().describe("场景中文名"),
+          audienceProfile: z.string().describe("观众画像"),
+        }),
+        execute: async (input) => {
+          try {
+            const onepager = await generateOnePager({
+              projectUnderstanding: {
+                name: input.projectName,
+                summary: input.projectSummary,
+                type: input.projectType as ProjectType,
+                targetUsers: input.targetUsers,
+                coreFeatures: input.coreFeatures,
+                highlights: input.highlights,
+                techStack: input.techStack,
+                risks: [],
+              },
+              displayStrategy: {
+                scenario: input.scenario as "course-defense" | "job-interview" | "open-source-promo" | "product-launch" | "team-report" | "custom",
+                scenarioLabel: input.scenarioLabel,
+                audienceProfile: input.audienceProfile,
+                totalDuration: "",
+                emphasisPoints: [],
+                estimatedStructure: [],
+                recommendedAssets: [],
+              },
+            });
+            return {
+              success: true,
+              data: onepager,
+              summary: {
+                projectName: onepager.projectName,
+                tagline: onepager.tagline,
+              },
+            };
+          } catch (err) {
+            return {
+              error: `One-pager 生成失败: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        },
+      }),
     },
-    // 最多执行 10 步工具调用（防止无限循环）
-    stopWhen: stepCountIs(10),
+    // 最多执行 15 步工具调用（资产生成流程较长）
+    stopWhen: stepCountIs(15),
   });
 
   // AI SDK v6: 用 toUIMessageStreamResponse() 返回流式响应

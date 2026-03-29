@@ -97,3 +97,61 @@ export const displayStrategySchema = z.object({
 });
 
 export type DisplayStrategy = z.infer<typeof displayStrategySchema>;
+
+// ========== PPT 大纲 Schema — PPT Architect Subagent 的输出格式 ==========
+export const pptOutlineSchema = z.object({
+  // PPT 标题
+  title: z.string().describe("PPT 的主标题"),
+  // PPT 副标题
+  subtitle: z.string().describe("副标题，通常是项目一句话介绍"),
+  // 每一页的内容
+  slides: z
+    .array(
+      z.object({
+        // 页面标题
+        title: z.string().describe("这一页的标题"),
+        // 页面布局类型
+        layout: z
+          .enum(["title", "content", "two-column", "image-text", "bullets", "summary"])
+          .describe("页面布局类型"),
+        // 要点列表
+        bullets: z.array(z.string()).describe("这一页的要点，每个 bullet 不超过 25 字"),
+        // 演讲备注（给演讲者看的）
+        speakerNotes: z.string().describe("演讲者备注，提示这页该说什么"),
+      })
+    )
+    .describe("PPT 的所有页面"),
+  // 总页数
+  totalSlides: z.number().describe("PPT 总页数"),
+});
+
+export type PptOutline = z.infer<typeof pptOutlineSchema>;
+
+// ========== One-pager Schema — One-pager Designer Subagent 的输出格式 ==========
+export const onePagerSchema = z.object({
+  // 项目名称
+  projectName: z.string().describe("项目名称"),
+  // 项目标语
+  tagline: z.string().describe("一句话标语，简洁有力"),
+  // 问题陈述
+  problem: z.string().describe("解决什么问题，2-3 句话"),
+  // 解决方案
+  solution: z.string().describe("怎么解决的，2-3 句话"),
+  // 核心功能（3 个）
+  keyFeatures: z
+    .array(
+      z.object({
+        title: z.string().describe("功能名称"),
+        description: z.string().describe("功能描述，一句话"),
+      })
+    )
+    .describe("核心功能列表，3 个"),
+  // 技术架构概述
+  techHighlight: z.string().describe("技术架构或亮点的一句话概述"),
+  // 目标用户
+  targetAudience: z.string().describe("目标用户一句话"),
+  // 行动号召
+  callToAction: z.string().describe("CTA 文案，如'立即体验'、'Star on GitHub'"),
+});
+
+export type OnePager = z.infer<typeof onePagerSchema>;
