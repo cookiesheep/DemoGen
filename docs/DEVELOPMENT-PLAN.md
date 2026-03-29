@@ -8,403 +8,224 @@
 | Phase 2 | GitHub 分析 + 项目理解卡片 | ✅ 完成 |
 | Phase 3 | 多输入 + 场景选择 + 策略推荐 | ✅ 完成 |
 | Phase 4 | 资产生成（讲稿 + PPT + One-pager） | ✅ 完成 |
-
-## 第二轮改进：从"能用"到"好用"
-
-Phase 1-4 打通了核心链路，但存在 4 个严重的交互问题：
-
-1. **Agent 行为不可见** — 用户看不到 Agent 在做什么，只看到工具名和 JSON
-2. **资产不可交互** — 右侧生成的内容只读，不能编辑修改
-3. **没有资产选择框** — 场景选好后 Agent 自己决定生成什么，用户没有选择权
-4. **Subagent 状态不可见** — 不知道哪个 Subagent 在工作，无法单独和它对话
-
-这些问题按"影响 × 可行性"排优先级，拆成 5 个小阶段，每个阶段聚焦一个问题。
+| Phase 5A | 工具调用增强展示 | ✅ 完成 |
+| Phase 5B | 资产多选确认框 | ✅ 完成 |
+| Phase 5C | 讲稿可编辑 | ✅ 完成 |
+| Phase 5D | PPT/One-pager 可编辑 | ✅ 完成 |
+| Phase 5E | 对话式资产修改 | ✅ 完成（prompt 遵从性不足，需重构） |
 
 ---
 
-## 未完成阶段概览
+## 架构重构：从 Prompt 驱动到代码驱动
 
-| 阶段 | 内容 | 优先级 | 难度 | 解决的问题 |
-|------|------|--------|------|-----------|
-| Phase 5A | 工具调用增强展示 | 🔴 最高 | ⭐⭐ | 问题1：Agent 行为不可见 |
-| Phase 5B | 资产多选确认框 | 🟡 高 | ⭐ | 问题3：没有资产选择框 |
-| Phase 5C | 讲稿可编辑 | 🔴 最高 | ⭐⭐ | 问题2：资产不可交互（讲稿） |
-| Phase 5D | PPT/One-pager 可编辑 | 🟡 高 | ⭐⭐⭐ | 问题2：资产不可交互（其余） |
-| Phase 5E | 对话式资产修改 | 🟡 高 | ⭐⭐⭐ | 问题2：对话驱动的修改能力 |
-| Phase 6 | Subagent 可见性与切换 | 🟢 中 | ⭐⭐⭐⭐ | 问题4：Subagent 状态 |
-| Phase 7 | 导出 + 打磨 + 部署 | 🟢 中 | ⭐⭐ | 产品化收尾 |
+### 为什么要重构
 
----
+Phase 1-5 采用"纯 LLM 自由决策"：Orchestrator 持有所有工具，靠 prompt 控制流程。
+这导致 3 个根本问题：
 
-## Phase 5A: 工具调用增强展示
+1. **LLM 不听话** — DeepSeek/中转 API 的 prompt 遵从性弱，Agent 生成资产后还在左侧输出大段内容
+2. **Prompt 补救是死胡同** — 5A-5E 本质都在"用更强硬的 prompt 补救架构缺陷"
+3. **流程不确定** — 每次运行结果不一样，用户体验不可预测
 
-### 解决的问题
-当前 ToolCallDisplay 只显示工具英文名、原始 JSON 参数、和"执行中..."文字。
-用户完全看不懂 Agent 在做什么。
+### 解决方案：状态机 + 工具限制
 
-### 目标
-每个工具调用显示为**人类可读的行为卡片**，包含：
-- 清晰的中文行为描述（不是 JSON）
-- 工具执行中：显示正在做什么（如"分析 GitHub 仓库 owner/repo..."）
-- 工具完成后：显示关键发现摘要（如"识别为 Web App，3 个核心功能"）
+**核心思想：代码控制流程，LLM 只负责生成内容。**
 
-### 效果示例
+每次 API 请求到达后端时：
+1. 从消息历史中**推导当前状态**（哪些工具已完成）
+2. 只暴露当前状态下**允许的工具**给 LLM
+3. 给 LLM 一个**极简的、状态专用的 prompt**（1-2 句话）
 
-```
-🔍 分析项目
-  执行中...
-  ├─ GitHub 仓库: owner/repo
-  └─ 同时分析用户描述和上传文档
-```
-
-完成后变为：
-
-```
-✅ 分析项目 — 完成
-  项目类型: Web App
-  核心功能: 3 个
-  技术亮点: 2 个
-  → 已生成项目理解卡片，请查看右侧
-```
-
-### 具体改动
-
-#### 5A.1 重写 ToolCallDisplay 组件
-- 不再显示原始 JSON args
-- 为每种工具定义**运行时描述**和**完成摘要**的渲染逻辑
-- `analyzeProject`：运行时显示仓库名或"分析上传文档"；完成后显示项目类型、功能数量等
-- `planStrategy`：运行时显示场景名；完成后显示推荐资产列表、总时长
-- `generateScript`：运行时显示"正在撰写讲稿..."；完成后显示字数
-- `generatePPT`：运行时显示"正在设计 PPT 大纲..."；完成后显示页数
-- `generateOnePager`：运行时显示"正在生成一页纸..."；完成后显示标语
-
-#### 5A.2 工具结果结构增强
-- 修改各 tool 的 execute 返回值，增加 `summary` 字段
-- 例如 `analyzeProject` 完成后返回：
-  ```typescript
-  {
-    success: true,
-    data: understanding,
-    summary: {
-      projectType: "web-app",
-      featureCount: 3,
-      highlightCount: 2,
-    }
-  }
-  ```
-- ToolCallDisplay 用 summary 渲染人类可读的摘要
-
-#### 5A.3 运行时参数可读化
-- 替换 `formatArgs` 函数，为每种工具定义专用的运行时描述
-- 例如 `analyzeProject` 运行时不显示 `githubUrl: "https://..."`, 而是显示 `分析仓库 owner/repo`
-
-### 不做的事
-- 不做 sub-step 流式进度（工具是原子执行的，无法流式展示内部步骤）
-- 不拆分 analyzeProject 为多个小工具（保持架构简单）
-
-### 验证
-- 每个工具调用显示清晰的中文描述
-- 运行中和完成后的显示不同
-- 不再出现任何 JSON
-- `npm run build` 通过
+LLM 无法"走偏"，因为它**字面上没有错误工具可以调用**。
 
 ---
 
-## Phase 5B: 资产多选确认框
+## 状态机设计
 
-### 解决的问题
-当前用户选完场景后，Agent 自己决定生成什么资产。用户没有选择权。
-
-### 目标
-策略生成后，弹出资产选择框（多选），用户勾选想要的资产后才开始生成。
-
-### 效果示例
+### 状态枚举
 
 ```
-根据"课程答辩"场景，推荐生成以下资产：
-
-[✅] 答辩讲稿 — 8分钟演讲稿 (Markdown)
-[✅] 答辩PPT大纲 — 含备注的幻灯片结构
-[✅] 项目一页纸 — 精炼的项目介绍卡
-
-[开始生成]
+ANALYZING        → 分析项目（只有 analyzeProject 可用）
+AWAITING_SCENARIO → 等待用户选择场景（只有 askUserChoice 可用）
+PLANNING         → 生成展示策略（只有 planStrategy 可用）
+AWAITING_ASSETS  → 等待用户确认资产（只有 confirmAssets 可用）
+GENERATING       → 批量生成资产（只有 generateScript/PPT/OnePager 可用）
+EDITING          → 编辑和修改（只有 reviseAsset 可用）
 ```
 
-### 具体改动
-
-#### 5B.1 新建 AssetSelector 组件
-- 类似 ChoiceSelector，但支持**多选**（checkbox 而非 radio）
-- 每个选项显示资产名称 + 简短描述
-- 默认全选（根据策略推荐）
-- 底部"开始生成"按钮
-
-#### 5B.2 注册 confirmAssets 前端工具
-- 在 route.ts 中添加 `confirmAssets` 工具（无 execute，前端工具）
-- inputSchema: `{ recommendedAssets: [{ type, label, reason }] }`
-- result: `{ selectedAssets: string[] }` — 用户勾选的资产类型列表
-
-#### 5B.3 修改 Orchestrator 流程
-- 更新 ORCHESTRATOR_PROMPT，在 Step 4 中：
-  - planStrategy 完成后，调用 `confirmAssets` 展示推荐资产
-  - 用户确认后，只生成用户选择的资产
-- Step 5 的生成逻辑根据 selectedAssets 决定调用哪些工具
-
-#### 5B.4 在 thread.tsx 注册渲染
-- `tools.by_name.confirmAssets: AssetSelector`
-
-### 验证
-- 策略生成后弹出多选框
-- 用户可以取消不想要的资产
-- 只生成用户选择的资产
-- `npm run build` 通过
-
----
-
-## Phase 5C: 讲稿可编辑
-
-### 解决的问题
-右侧生成的讲稿只能看不能改。这是用户最直接需要的编辑功能。
-
-### 目标
-讲稿预览区支持**编辑/预览双模式**，用户可以直接修改文本并保存。
-
-### 效果示例
+### 状态转移图
 
 ```
-📝 讲稿                    [预览] [编辑] [导出]
-─────────────────────────────────────────
-## 第一章：开场与问题定义（1分钟）
-
-各位老师好，今天我们团队要展示的项目是...
+用户首次输入
+    │
+    ▼
+ANALYZING ──analyzeProject完成──▶ AWAITING_SCENARIO
+                                        │
+                                  用户选择场景
+                                        │
+                                        ▼
+                                    PLANNING ──planStrategy完成──▶ AWAITING_ASSETS
+                                                                        │
+                                                                  用户确认资产
+                                                                        │
+                                                                        ▼
+                                                                  GENERATING
+                                                                  │ 逐个生成
+                                                                  │ 选中的资产
+                                                                  ▼
+                                                               EDITING
+                                                               │ 用户修改
+                                                               │ 任意资产
+                                                               ▼
+                                                             (循环)
 ```
 
-点击"编辑"后切换为 textarea：
+### 状态推导逻辑
 
+后端从消息历史中扫描已完成的工具调用来确定状态：
+
+```typescript
+function deriveState(messages: UIMessage[]): AgentState {
+  // 扫描所有消息中已完成的工具调用
+  const completedTools = extractCompletedToolCalls(messages);
+
+  const hasAnalysis   = completedTools.has("analyzeProject");
+  const hasScenario   = completedTools.has("askUserChoice");
+  const hasStrategy   = completedTools.has("planStrategy");
+  const hasAssetConf  = completedTools.has("confirmAssets");
+
+  // 检查资产生成进度
+  const selectedAssets  = getSelectedAssets(completedTools);  // 用户选了哪些
+  const generatedAssets = getGeneratedAssets(completedTools); // 已生成哪些
+  const allGenerated    = selectedAssets.every(a => generatedAssets.has(a));
+
+  if (!hasAnalysis)   return "analyzing";
+  if (!hasScenario)   return "awaiting_scenario";
+  if (!hasStrategy)   return "planning";
+  if (!hasAssetConf)  return "awaiting_assets";
+  if (!allGenerated)  return "generating";
+  return "editing";
+}
 ```
-📝 讲稿                    [预览] [编辑✓] [导出]
-─────────────────────────────────────────
-┌──────────────────────────────────────┐
-│ ## 第一章：开场与问题定义（1分钟）    │
-│                                      │
-│ 各位老师好，今天我们团队要展示的...   │
-│ [用户可以直接在这里修改文本]         │
-└──────────────────────────────────────┘
+
+### 每个状态的配置
+
+| 状态 | 可用工具 | System Prompt |
+|------|---------|---------------|
+| analyzing | analyzeProject | "调用 analyzeProject 分析项目。完成后只说'已完成分析。'" |
+| awaiting_scenario | askUserChoice | "调用 askUserChoice 让用户选场景。options: [课程答辩,面试展示,开源推广,产品发布,团队汇报]" |
+| planning | planStrategy | "调用 planStrategy 生成展示策略。完成后只说'策略已生成。'" |
+| awaiting_assets | confirmAssets | "调用 confirmAssets，把策略中的 recommendedAssets 传给用户确认。" |
+| generating | generateScript/PPT/OnePager | "依次调用工具生成资产。不要输出任何文字，只调用工具。" |
+| editing | reviseAsset | "用户可以编辑资产。收到修改请求时调用 reviseAsset。只回复1句话。" |
+
+---
+
+## 改动影响评估
+
+### 需要改动的文件
+
+| 文件 | 改动类型 | 影响 |
+|------|---------|------|
+| `src/lib/ai/state-machine.ts` | **新建** | 状态推导 + 状态配置（~120 行） |
+| `src/app/api/agent/route.ts` | **重写** | 使用状态机驱动流程（从 ~400 行简化到 ~150 行） |
+| `src/lib/ai/prompts.ts` | **简化** | 一个大 prompt → 6 个小 prompt（更可控） |
+| `src/components/agent/tool-call-display.tsx` | **不变** | 已有的增强展示继续工作 |
+| `src/components/agent/choice-selector.tsx` | **不变** | 前端工具组件不需要改 |
+| `src/components/agent/asset-selector.tsx` | **不变** | 前端工具组件不需要改 |
+| `src/components/preview/*` | **不变** | 预览和编辑组件全部保留 |
+| `src/lib/ai/subagents/*` | **不变** | Subagent 内部逻辑不变 |
+| `src/lib/ai/revise.ts` | **不变** | 资产修改逻辑不变 |
+
+### 不需要改动的部分
+
+- **所有前端组件** — assistant-ui 无感知，消息格式不变
+- **所有 Subagent** — 仍然是纯函数，被工具的 execute 调用
+- **PreviewContext** — 数据流不变，仍由 ToolCallDisplay 推送
+- **资产编辑功能** — 5C/5D 的编辑完全保留
+
+### 工期估计
+
+| 步骤 | 内容 | 预计 |
+|------|------|------|
+| R1 | 创建 state-machine.ts（状态推导 + 配置） | 30 分钟 |
+| R2 | 重写 route.ts（使用状态机） | 30 分钟 |
+| R3 | 重写 prompts.ts（状态专用 prompt） | 15 分钟 |
+| R4 | 测试全流程 | 15 分钟 |
+| **合计** | | **~1.5 小时** |
+
+---
+
+## 实施步骤
+
+### Step R1: 创建状态机模块
+
+新建 `src/lib/ai/state-machine.ts`：
+- `AgentState` 类型定义
+- `deriveState(messages)` — 从消息历史推导状态
+- `getStateConfig(state, context)` — 返回该状态的工具集和 prompt
+- 辅助函数：提取已完成的工具调用、已选资产、已生成资产
+
+**验收**：单元级别 — 函数逻辑正确，TypeScript 编译通过
+
+### Step R2: 重写 route.ts
+
+将当前的"一个大 streamText + 全部工具"改为：
+```
+POST → 解析消息 → deriveState → getStateConfig → streamText(限制工具+精简prompt)
 ```
 
-### 具体改动
+**验收**：`npm run build` 通过
 
-#### 5C.1 改造 ScriptPreview 组件
-- 添加编辑/预览模式切换状态
-- 预览模式：现有的 ReactMarkdown 渲染（不变）
-- 编辑模式：全屏 textarea，等宽字体，显示 Markdown 源码
-- 顶部工具栏：模式切换按钮 + 导出按钮（导出先占位）
+### Step R3: 重写 prompts.ts
 
-#### 5C.2 PreviewContext 添加更新方法
-- 添加 `updateScriptContent(content: string)` 方法
-- 编辑保存时调用，更新 Context 中的讲稿内容
-- 其他组件（如未来的导出功能）始终读取最新内容
+删除 ORCHESTRATOR_PROMPT（一个 80 行的大 prompt），替换为 6 个状态专用 prompt：
+- 每个 prompt 只有 1-3 句话
+- 只描述当前状态该做什么
+- LLM 不需要理解整个流程
 
-#### 5C.3 编辑器 UX 细节
-- 编辑模式下 textarea 自动聚焦
-- 实时同步（onChange 直接更新 Context，无需手动保存按钮）
-- 切换到预览模式时立即渲染最新内容
-- textarea 高度自适应内容
+**验收**：`npm run build` 通过
 
-### 不做的事
-- 不引入重量级编辑器库（CodeMirror/Monaco）—— textarea 足够用
-- 不做实时 Markdown 预览分屏 —— 两个模式切换即可
-- 导出 PDF 功能留到 Phase 7
+### Step R4: 端到端测试
 
-### 验证
-- 讲稿可以在编辑和预览模式之间切换
-- 编辑内容保存到 PreviewContext
-- 切回预览模式显示最新内容
-- `npm run build` 通过
+1. 提交项目 → 分析 → 场景选择 → 策略 → 资产确认 → 生成 → 完成
+2. 验证左侧不会输出大段文字
+3. 验证修改资产走 reviseAsset 工具
+4. 验证每个状态只有正确的工具可用
+
+**验收**：全流程无异常，Agent 行为完全可预测
 
 ---
 
-## Phase 5D: PPT 大纲 + One-pager 可编辑
+## 重构后 Phase 5 的状态
 
-### 解决的问题
-PPT 大纲和 One-pager 也需要可编辑能力。
-
-### 目标
-PPT 每一页的标题/要点/备注可以内联编辑。One-pager 的每个字段可以内联编辑。
-
-### 具体改动
-
-#### 5D.1 PptPreview 支持内联编辑
-- 每个 slide 卡片添加"编辑"按钮
-- 点击后，标题变为 input，bullets 变为 textarea（每行一个要点）
-- speakerNotes 变为 textarea
-- "保存"按钮提交修改到 PreviewContext
-
-#### 5D.2 OnePagerPreview 支持内联编辑
-- 每个区块（problem/solution/features/techHighlight 等）添加编辑按钮
-- 点击后对应文本变为 input/textarea
-- 保存到 PreviewContext
-
-#### 5D.3 PreviewContext 添加更新方法
-- `updatePptOutline(data: PptOutline)` — 更新整个 PPT 大纲
-- `updateOnePager(data: OnePager)` — 更新整个 One-pager
-- 组件内部管理临时编辑状态，保存时一次性更新 Context
-
-### 验证
-- PPT 每页可编辑标题、要点、备注
-- One-pager 每个字段可编辑
-- 编辑保存后 PreviewContext 更新
-- `npm run build` 通过
+| 原 Phase | 是否仍需要 | 说明 |
+|----------|-----------|------|
+| 5A 工具调用增强展示 | ✅ 保留 | ToolCallDisplay 组件不变，继续提供人类可读的行为卡片 |
+| 5B 资产多选确认框 | ✅ 保留 | AssetSelector 组件不变，confirmAssets 工具不变 |
+| 5C 讲稿可编辑 | ✅ 保留 | ScriptPreview 编辑模式不变 |
+| 5D PPT/One-pager 可编辑 | ✅ 保留 | 内联编辑组件不变 |
+| 5E 对话式资产修改 | ✅ 修复 | reviseAsset 工具不变，但现在 LLM 在 editing 状态**只有这个工具可用**，不会再"自己输出文字" |
+| Phase 6 Subagent 切换 | ❌ 不再需要 | 状态机已经让流程完全可见，不需要额外的 Subagent UI |
 
 ---
 
-## Phase 5E: 对话式资产修改
-
-### 解决的问题
-用户想通过对话修改资产（"把讲稿第三段改成..."），而不是手动编辑。
-
-### 目标
-用户在左侧聊天中描述修改需求，Agent 调用对应的 Subagent 重新生成指定部分。
-
-### 具体改动
-
-#### 5E.1 新增 reviseAsset 工具
-- 在 route.ts 注册 `reviseAsset` 工具
-- inputSchema:
-  ```typescript
-  {
-    assetType: z.enum(["script", "ppt", "onepager"]),
-    currentContent: z.string(), // 当前资产内容（JSON 或 Markdown）
-    instructions: z.string(),   // 用户的修改指令
-  }
-  ```
-- execute: 根据 assetType 调用对应的 Subagent，传入当前内容 + 修改指令
-
-#### 5E.2 新增修改用 Subagent prompt
-- 为每种资产的 Subagent 添加"修改模式"的 prompt
-- 接收当前内容 + 修改指令，输出修改后的完整内容
-- 保持与原始生成相同的 schema 约束
-
-#### 5E.3 更新 Orchestrator prompt
-- 添加规则：当用户发送修改请求时，调用 reviseAsset 工具
-- Agent 需要判断用户想修改哪种资产
-
-#### 5E.4 前端处理 reviseAsset 结果
-- ToolCallDisplay 识别 reviseAsset 工具
-- 完成后更新 PreviewContext 中对应资产的内容
-
-### 验证
-- 用户说"把讲稿开头改成更有吸引力的"，Agent 调用 reviseAsset
-- 讲稿内容在右侧更新
-- PPT 和 One-pager 的对话式修改同样工作
-- `npm run build` 通过
-
----
-
-## Phase 6: Subagent 可见性与切换（可延后）
-
-### 解决的问题
-用户看不到各个 Subagent 的状态，无法单独和某个 Subagent 对话。
-
-### 目标
-左侧面板顶部显示 Subagent 状态栏，点击可切换对话对象。
-
-### 评估
-这是架构级改动，需要：
-- 重新设计消息的归属（哪条消息来自哪个 Subagent）
-- 多个对话线程的状态管理
-- assistant-ui 消息结构可能需要扩展
-
-**建议：在 5A-5E 全部完成、产品基本可用后再考虑。**
-如果时间不够，用 Phase 5A 的增强展示代替（工具调用卡片已经能间接展示 Subagent 行为）。
-
-### 具体改动（草案）
-
-#### 6.1 Subagent 状态栏组件
-- 顶部显示所有 Subagent 状态：`[Orchestrator] [Analysis ✅] [Strategy ✅] [Script 🔄] [PPT]`
-- 从 PreviewContext 推导状态（有数据 = 完成）
-
-#### 6.2 消息标签
-- 在 AssistantMessage 组件中添加来源标签
-- 根据工具调用上下文推断消息来自哪个 Subagent
-
-#### 6.3 对话切换（高难度）
-- 需要多个独立的 thread 或 filtered view
-- 可能需要自定义 assistant-ui runtime
-
----
-
-## Phase 7: 导出 + 打磨 + 部署
-
-### 步骤
-
-#### 7.1 导出功能
-- 讲稿导出为 Markdown 文件（浏览器端下载）
-- PPT 大纲导出为 Markdown 或 JSON（后期可接 Pandoc 转 PPTX）
-- One-pager 导出为 PDF（使用浏览器 print API）
-
-#### 7.2 UI 打磨
-- Loading 状态完善（骨架屏）
-- 错误处理和重试机制
-- 空状态优化
-- 移动端适配（折叠面板）
-
-#### 7.3 测试 + 部署
-- 3-5 个真实 GitHub 项目端到端测试
-- Vercel 部署配置
-- 环境变量和 API Key 管理
-
----
-
-## 实施建议
-
-1. **每次只做一个 Phase**，完成后测试确认再继续
-2. **推荐顺序：5A → 5B → 5C → 5D → 5E → 7 → 6**
-3. Phase 5A 和 5B 可以独立并行开发
-4. Phase 6 视时间决定是否实施，不影响产品核心体验
-5. 每个 Phase 完成后 commit，保持可回滚
-
----
-
-## 历史记录
-
-### Phase 1-4 详细步骤（已完成，折叠保存）
+## 历史阶段（折叠）
 
 <details>
-<summary>展开查看 Phase 1-4 详细步骤</summary>
+<summary>展开查看 Phase 1-5 详细步骤</summary>
 
-### Phase 1: 项目初始化 + 最小 Agent 对话
-- 1.1 项目初始化（create-next-app + 依赖安装 + shadcn/ui）
-- 1.2 左右分栏布局（page.tsx）
-- 1.3 最小 Agent API（/api/agent/route.ts + getCurrentTime 测试工具）
-- 1.4 Agent 面板（useChatRuntime + ThreadPrimitive + ToolCallDisplay）
-- 1.5 验证 & 提交
+### Phase 1-4: 核心功能链路
+- Phase 1: 项目初始化 + 最小 Agent 对话
+- Phase 2: GitHub 分析 + 项目理解卡片
+- Phase 3: 多输入 + 场景选择 + 策略推荐
+- Phase 4: 资产生成（讲稿 + PPT + One-pager）
 
-### Phase 2: GitHub 分析 + 项目理解卡片
-- 2.1 GitHub 分析器（parseGitHubUrl + analyzeRepo）
-- 2.2 项目理解 Schema（projectUnderstandingSchema）
-- 2.3 Analysis Subagent（generateObject + schema）
-- 2.4 analyzeProject 工具注册
-- 2.5 项目理解卡片（ProjectCard 组件）
-- 2.6 PreviewContext + PreviewPanel
-- 2.7 验证 & 提交
-
-### Phase 3: 多输入 + 场景选择 + 策略推荐
-- 3.1 InputArea 组件（链接 + 文件上传 + 文字描述）
-- 3.2 文件上传 API（/api/upload）
-- 3.3 Analysis Subagent 支持多输入
-- 3.4 策略 Schema + Strategy Subagent
-- 3.5 askUserChoice 前端工具 + ChoiceSelector
-- 3.6 StrategyCard 组件
-- 3.7 验证 & 提交
-
-### Phase 4: 资产生成（讲稿 + PPT + One-pager）
-- 4.1 Script Writer Subagent（generateText）
-- 4.2 PPT Architect Subagent（generateObject + pptOutlineSchema）
-- 4.3 One-pager Designer Subagent（generateObject + onePagerSchema）
-- 4.4 三个生成工具注册到 route.ts
-- 4.5 PreviewContext 扩展（scriptContent/pptOutline/onePager）
-- 4.6 ScriptPreview / PptPreview / OnePagerPreview 组件
-- 4.7 PreviewPanel 标签栏支持全部 5 种资产
-- 4.8 验证 & 提交
+### Phase 5A-5E: 交互改进
+- 5A: 工具调用增强展示（ToolCallDisplay 重写）
+- 5B: 资产多选确认框（AssetSelector + confirmAssets）
+- 5C: 讲稿可编辑（ScriptPreview 编辑/预览双模式）
+- 5D: PPT/One-pager 可编辑（内联编辑 + EditableText）
+- 5E: 对话式资产修改（reviseAsset 工具 + revise.ts）
 
 </details>
