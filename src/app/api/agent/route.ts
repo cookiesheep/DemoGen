@@ -280,8 +280,15 @@ export async function POST(req: Request) {
     system: systemPrompt,
     messages: modelMessages,
     tools,
-    // generating 状态可能需要连续调用多个生成工具
-    stopWhen: stepCountIs(ctx.state === "generating" ? 5 : 2),
+    // stepCount 控制：
+    // - analyzing/planning: 1 步（调完工具就停，前端自动推进到下一状态）
+    // - awaiting_scenario/awaiting_assets: 1 步（调前端工具就停，等待用户操作）
+    // - generating: 5 步（需要连续调用多个生成工具）
+    // - editing: 2 步（调 reviseAsset + 说一句"已修改"）
+    stopWhen: stepCountIs(
+      ctx.state === "generating" ? 5 :
+      ctx.state === "editing" ? 2 : 1
+    ),
   });
 
   return result.toUIMessageStreamResponse();

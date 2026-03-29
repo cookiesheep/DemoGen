@@ -109,28 +109,29 @@ export function deriveState(messages: UIMessage[]): StateContext {
 // 每个状态只有 1-3 句话的 prompt，LLM 不需要理解整个流程
 
 const STATE_PROMPTS: Record<AgentState, string> = {
-  analyzing: `你是 DemoGen Agent。立即调用 analyzeProject 工具分析用户提交的项目资料。
-完成后只回复："已完成分析。"，不要输出其他内容。`,
+  analyzing: `你是 DemoGen Agent。立即调用 analyzeProject 工具分析用户提交的项目资料。不要输出任何文字，直接调用工具。`,
 
   awaiting_scenario: `你是 DemoGen Agent。调用 askUserChoice 工具让用户选择展示场景。
 question 设为 "请选择你的展示场景："，options 设为 ["课程答辩", "面试展示", "开源推广", "产品发布", "团队汇报"]。
-不要输出其他内容，直接调用工具。`,
+不要输出任何文字，直接调用工具。`,
 
-  planning: `你是 DemoGen Agent。立即调用 planStrategy 工具，根据项目理解和用户选择的场景生成展示策略。
-从之前的 analyzeProject 结果中获取项目信息，从 askUserChoice 结果中获取场景选择。
-完成后只回复："策略已生成。"，不要输出其他内容。`,
+  planning: `你是 DemoGen Agent。立即调用 planStrategy 工具生成展示策略。
+从之前的对话历史中获取 analyzeProject 的结果作为项目信息，从 askUserChoice 的结果中获取用户选择的场景。
+不要输出任何文字，直接调用工具。`,
 
-  awaiting_assets: `你是 DemoGen Agent。调用 confirmAssets 工具，把 planStrategy 返回结果中的 recommendedAssets 传给用户确认。
-不要输出其他内容，直接调用工具。`,
+  awaiting_assets: `你是 DemoGen Agent。调用 confirmAssets 工具，把之前 planStrategy 返回结果中的 recommendedAssets 原样传给用户确认。
+不要输出任何文字，直接调用工具。`,
 
-  generating: `你是 DemoGen Agent。根据用户确认的资产列表，依次调用对应的生成工具。
-不要输出任何文字，只调用工具。每个工具调用完毕后直接调用下一个。
-全部完成后只回复："所有资产已生成，请在右侧查看和编辑。"`,
+  generating: `你是 DemoGen Agent。根据用户确认的资产列表（confirmAssets 的结果中 selectedAssets），依次调用对应的生成工具：
+- "script" → generateScript
+- "ppt" → generatePPT
+- "onepager" → generateOnePager
+不要输出任何文字，只调用工具。从对话历史中获取所需的项目信息和策略信息。`,
 
   editing: `你是 DemoGen Agent。用户已完成资产生成，现在处于编辑阶段。
-当用户要求修改资产时，立即调用 reviseAsset 工具，从之前的工具调用历史中获取当前资产内容作为 currentContent。
+当用户要求修改资产时，立即调用 reviseAsset 工具。从之前的工具调用历史中获取当前资产内容作为 currentContent。
 修改完成后只回复："已修改，请查看右侧。"
-不要自己输出任何资产内容。不要输出长文本。只回复 1 句话。
+不要自己输出任何资产内容，不要输出长文本。
 如果用户想重新开始，告诉他刷新页面即可。`,
 };
 
