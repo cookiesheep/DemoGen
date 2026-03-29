@@ -121,6 +121,25 @@ export async function POST(req: Request) {
         // AI SDK 会在工具调用后暂停，等待前端通过 addToolResult 提供结果
       }),
 
+      // 前端工具：让用户确认要生成的资产（多选）
+      // 策略生成后调用，展示推荐的资产列表，用户勾选后开始生成
+      confirmAssets: tool({
+        description:
+          "向用户展示推荐的资产列表（多选），等待用户确认要生成哪些资产",
+        inputSchema: z.object({
+          recommendedAssets: z
+            .array(
+              z.object({
+                type: z.string().describe("资产类型：script/ppt/onepager"),
+                label: z.string().describe("资产中文名称"),
+                reason: z.string().describe("为什么推荐这个资产"),
+              })
+            )
+            .describe("推荐的资产列表"),
+        }),
+        // 无 execute — 前端工具，由 AssetSelector 组件渲染
+      }),
+
       // 核心工具：规划展示策略
       // 内部调用 Strategy Subagent
       planStrategy: tool({

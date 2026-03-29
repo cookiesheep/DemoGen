@@ -11,6 +11,7 @@ import {
 import { SendHorizontal } from "lucide-react";
 import { ToolCallDisplay } from "./tool-call-display";
 import { ChoiceSelector } from "./choice-selector";
+import { AssetSelector } from "./asset-selector";
 import { InputArea } from "./input-area";
 import { MarkdownText } from "./markdown-text";
 
@@ -75,6 +76,7 @@ function AssistantMessage() {
               // askUserChoice 工具用专门的选项按钮组件渲染
               by_name: {
                 askUserChoice: ChoiceSelector,
+                confirmAssets: AssetSelector,
               },
               // 其他工具用通用的工具调用展示组件
               Fallback: ToolCallDisplay,

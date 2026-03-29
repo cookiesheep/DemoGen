@@ -15,6 +15,7 @@ import {
   LayoutGrid,
   FileSpreadsheet,
   Clock,
+  Package,
 } from "lucide-react";
 import { usePreview } from "../preview/preview-context";
 import type { ProjectUnderstanding, DisplayStrategy, PptOutline, OnePager } from "@/lib/ai/schemas";
@@ -360,5 +361,10 @@ const TOOL_CONFIGS: Record<
     label: "等待用户选择",
     icon: Target,
     completeTip: "用户已选择",
+  },
+  confirmAssets: {
+    label: "确认资产",
+    icon: Package,
+    completeTip: "用户已确认资产选择",
   },
 };

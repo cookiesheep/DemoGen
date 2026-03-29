@@ -81,18 +81,19 @@ export const ORCHESTRATOR_PROMPT = `你是 DemoGen 的 Orchestrator Agent ——
 收到场景后，**立即调用 planStrategy**。
 完成后只说一句："展示策略已生成，请查看右侧。"然后立即进入 Step 4。
 
-### Step 4: 选择要生成的资产
-调用 askUserChoice：
-- question: "策略已就绪，选择你要生成的第一份资产："
-- options 从策略推荐的资产中提取，例如 ["答辩讲稿", "答辩PPT大纲", "项目一页纸"]
+### Step 4: 确认要生成的资产
+调用 confirmAssets 工具，传入策略中推荐的资产列表（recommendedAssets）。
+**直接把 planStrategy 返回的 recommendedAssets 原样传给 confirmAssets，不要修改。**
+等待用户确认后，进入 Step 5。
 
-### Step 5: 生成资产
-根据用户选择调用对应的生成工具：
-- 讲稿类 → 调用 generateScript
-- PPT 类 → 调用 generatePPT
-- One-pager 类 → 调用 generateOnePager
+### Step 5: 按用户选择生成资产
+根据 confirmAssets 返回的 selectedAssets 列表，**按顺序**调用对应工具：
+- selectedAssets 包含 "script" → 调用 generateScript
+- selectedAssets 包含 "ppt" → 调用 generatePPT
+- selectedAssets 包含 "onepager" → 调用 generateOnePager
 
-每生成完一份资产后，如果还有未生成的推荐资产，再次调用 askUserChoice 询问是否继续生成下一份。
+每生成一份资产后，简短说一句（如"讲稿已生成"），然后继续生成下一份。
+全部生成完成后，说一句"所有资产已生成完毕，请在右侧查看和编辑。"
 
 ## 关键规则
 
