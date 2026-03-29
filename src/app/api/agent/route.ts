@@ -1,6 +1,19 @@
 // Agent API 入口 — 状态机驱动的 Orchestrator
-// 每次请求：从消息历史推导状态 → 只给 LLM 该状态的工具和 prompt
-// LLM 无法"走偏"，因为错误的工具根本不存在
+//
+// ===== 架构原理 =====
+//
+// 旧方案：把所有工具 + 一个大 prompt 传给 streamText，靠 LLM 自己决定流程。
+//   问题：LLM 不听话，生成资产后在左侧输出大段内容，修改时不调工具。
+//
+// 新方案（状态机）：
+//   1. 每次请求到达，从消息历史推导当前状态（deriveState）
+//   2. 根据状态选择：极简 prompt（1-3 句话）+ 该状态允许的工具集
+//   3. LLM 只能做当前步骤该做的事——因为其他工具根本不存在
+//
+// 关键洞察：流程控制由代码负责，LLM 只负责生成内容。
+// 这让弱模型也能可靠地工作，因为"调用唯一可用的工具"远比
+// "从 9 个工具中选对的那个"简单得多。
+
 import { streamText, tool, UIMessage, stepCountIs, convertToModelMessages } from "ai";
 import { z } from "zod";
 import { parseGitHubUrl, analyzeRepo } from "@/lib/github/analyzer";
@@ -10,17 +23,21 @@ import { generateScript } from "@/lib/ai/subagents/script-writer";
 import { generatePPT } from "@/lib/ai/subagents/ppt-architect";
 import { generateOnePager } from "@/lib/ai/subagents/onepager-designer";
 import { reviseScript, revisePpt, reviseOnePager } from "@/lib/ai/revise";
+import { STATE_PROMPTS } from "@/lib/ai/prompts";
 import { model } from "@/lib/ai/client";
-import { deriveState, getStatePrompt, getStateToolNames } from "@/lib/ai/state-machine";
+import { deriveState, getRemainingAssets } from "@/lib/ai/state-machine";
 import type { ProjectType } from "@/lib/ai/schemas";
 import type { ToolSet } from "ai";
 
-// ========== 全部工具定义 ==========
-// 所有工具在这里定义，route 根据状态筛选后传给 streamText
+// ========== 工具定义 ==========
+// 所有工具的定义放在这里，route handler 根据状态选择子集传给 streamText
+// 工具本身的逻辑不变——变的只是"哪些工具当前可见"
 
-const ALL_TOOLS: ToolSet = {
+const ALL_TOOLS = {
+  // 分析项目（analyzing 状态使用）
   analyzeProject: tool({
-    description: "分析用户提交的项目资料，生成结构化的项目理解",
+    description:
+      "分析用户提交的项目资料（GitHub 链接、文档、描述），生成结构化的项目理解",
     inputSchema: z.object({
       githubUrl: z.string().optional().describe("GitHub 仓库链接"),
       description: z.string().optional().describe("用户对项目的文字描述"),
@@ -30,11 +47,15 @@ const ALL_TOOLS: ToolSet = {
       let githubData = undefined;
       if (githubUrl) {
         const parsed = parseGitHubUrl(githubUrl);
-        if (!parsed) return { error: "无法解析 GitHub 链接，请检查格式" };
+        if (!parsed) {
+          return { error: "无法解析 GitHub 链接，请检查格式" };
+        }
         try {
           githubData = await analyzeRepo(parsed.owner, parsed.repo);
         } catch (err) {
-          return { error: `获取 GitHub 仓库数据失败: ${err instanceof Error ? err.message : String(err)}` };
+          return {
+            error: `获取 GitHub 仓库数据失败: ${err instanceof Error ? err.message : String(err)}`,
+          };
         }
       }
       try {
@@ -51,12 +72,14 @@ const ALL_TOOLS: ToolSet = {
           },
         };
       } catch (err) {
-        return { error: `AI 分析失败: ${err instanceof Error ? err.message : String(err)}` };
+        return {
+          error: `AI 分析失败: ${err instanceof Error ? err.message : String(err)}`,
+        };
       }
     },
   }),
 
-  // 前端工具：场景选择（无 execute）
+  // 场景选择（awaiting_scenario 状态使用，前端工具）
   askUserChoice: tool({
     description: "向用户展示选项并等待选择",
     inputSchema: z.object({
@@ -65,22 +88,11 @@ const ALL_TOOLS: ToolSet = {
     }),
   }),
 
-  // 前端工具：资产确认（无 execute）
-  confirmAssets: tool({
-    description: "向用户展示推荐的资产列表（多选），等待确认",
-    inputSchema: z.object({
-      recommendedAssets: z.array(z.object({
-        type: z.string().describe("资产类型：script/ppt/onepager"),
-        label: z.string().describe("资产中文名称"),
-        reason: z.string().describe("推荐理由"),
-      })).describe("推荐的资产列表"),
-    }),
-  }),
-
+  // 策略规划（planning 状态使用）
   planStrategy: tool({
     description: "根据项目理解和展示场景，规划展示策略",
     inputSchema: z.object({
-      scenario: z.string().describe("展示场景"),
+      scenario: z.string().describe("用户选择的展示场景"),
       projectName: z.string().describe("项目名称"),
       projectSummary: z.string().describe("项目一句话总结"),
       projectType: z.string().describe("项目类型"),
@@ -116,6 +128,19 @@ const ALL_TOOLS: ToolSet = {
     },
   }),
 
+  // 资产确认（awaiting_assets 状态使用，前端工具）
+  confirmAssets: tool({
+    description: "向用户展示推荐的资产列表（多选），等待确认",
+    inputSchema: z.object({
+      recommendedAssets: z.array(z.object({
+        type: z.string().describe("资产类型：script/ppt/onepager"),
+        label: z.string().describe("资产中文名称"),
+        reason: z.string().describe("推荐理由"),
+      })).describe("推荐的资产列表"),
+    }),
+  }),
+
+  // 生成讲稿（generating 状态使用）
   generateScript: tool({
     description: "生成完整的演讲稿（Markdown 格式）",
     inputSchema: z.object({
@@ -153,8 +178,9 @@ const ALL_TOOLS: ToolSet = {
     },
   }),
 
+  // 生成 PPT 大纲（generating 状态使用）
   generatePPT: tool({
-    description: "生成 PPT 大纲（每页标题、要点、布局建议）",
+    description: "生成 PPT 大纲（每页标题、要点、布局）",
     inputSchema: z.object({
       projectName: z.string(), projectSummary: z.string(),
       projectType: z.string(), targetUsers: z.string(),
@@ -190,6 +216,7 @@ const ALL_TOOLS: ToolSet = {
     },
   }),
 
+  // 生成 One-pager（generating 状态使用）
   generateOnePager: tool({
     description: "生成项目一页纸（精炼的项目介绍）",
     inputSchema: z.object({
@@ -222,10 +249,11 @@ const ALL_TOOLS: ToolSet = {
     },
   }),
 
+  // 修改资产（editing 状态使用）
   reviseAsset: tool({
-    description: "根据用户指令修改已生成的资产（讲稿/PPT大纲/一页纸）",
+    description: "根据用户指令修改已生成的资产",
     inputSchema: z.object({
-      assetType: z.enum(["script", "ppt", "onepager"]).describe("要修改的资产类型"),
+      assetType: z.enum(["script", "ppt", "onepager"]).describe("资产类型"),
       currentContent: z.string().describe("当前资产的完整内容"),
       instructions: z.string().describe("用户的修改指令"),
     }),
@@ -252,27 +280,76 @@ const ALL_TOOLS: ToolSet = {
   }),
 };
 
-// ========== API 入口 ==========
+// ========== 状态 → 工具集映射 ==========
+//
+// 这是状态机的核心控制点：每个状态只暴露特定的工具。
+// LLM 看不到其他工具，所以不可能调用错误的工具。
+//
+// 比如在 editing 状态，LLM 只有 reviseAsset 一个工具。
+// 它想"自己输出修改后的文本"？不行——系统会继续等它调工具。
+// 它想调 analyzeProject 重新分析？不行——这个工具不存在于当前调用中。
+
+function getToolsForState(state: string): ToolSet {
+  switch (state) {
+    case "analyzing":
+      return { analyzeProject: ALL_TOOLS.analyzeProject };
+
+    case "awaiting_scenario":
+      return { askUserChoice: ALL_TOOLS.askUserChoice };
+
+    case "planning":
+      return { planStrategy: ALL_TOOLS.planStrategy };
+
+    case "awaiting_assets":
+      return { confirmAssets: ALL_TOOLS.confirmAssets };
+
+    case "generating":
+      // 生成阶段暴露所有资产生成工具（LLM 按需调用）
+      return {
+        generateScript: ALL_TOOLS.generateScript,
+        generatePPT: ALL_TOOLS.generatePPT,
+        generateOnePager: ALL_TOOLS.generateOnePager,
+      };
+
+    case "editing":
+      return { reviseAsset: ALL_TOOLS.reviseAsset };
+
+    default:
+      return {};
+  }
+}
+
+// ========== API 路由处理器 ==========
+//
+// 新的请求处理流程：
+//   1. 解析消息 → 2. 推导状态 → 3. 选 prompt + 工具 → 4. streamText → 5. 返回
+//
+// 对比旧方案的 "一个大 streamText + 全部工具"，新方案每次只给 LLM
+// 最少的信息和最少的工具，让它做最简单的事。
 
 export async function POST(req: Request) {
   const { messages }: { messages: UIMessage[] } = await req.json();
 
-  // 1. 从消息历史推导当前状态
-  const ctx = deriveState(messages);
+  // Step 1: 从消息历史推导当前状态
+  const state = deriveState(messages);
 
-  // 2. 获取该状态的 prompt 和允许的工具名
-  const systemPrompt = getStatePrompt(ctx.state);
-  const allowedToolNames = getStateToolNames(ctx.state);
+  // Step 2: 获取该状态的 prompt 和工具集
+  let systemPrompt = STATE_PROMPTS[state];
+  const tools = getToolsForState(state);
 
-  // 3. 筛选出该状态允许的工具
-  const tools: ToolSet = {};
-  for (const name of allowedToolNames) {
-    if (ALL_TOOLS[name]) {
-      tools[name] = ALL_TOOLS[name];
-    }
+  // generating 状态下，告诉 LLM 还需要生成哪些资产
+  if (state === "generating") {
+    const remaining = getRemainingAssets(messages);
+    const assetLabels: Record<string, string> = {
+      script: "讲稿(generateScript)",
+      ppt: "PPT大纲(generatePPT)",
+      onepager: "一页纸(generateOnePager)",
+    };
+    const remainingList = remaining.map((a) => assetLabels[a] || a).join("、");
+    systemPrompt += `\n还需要生成：${remainingList}。`;
   }
 
-  // 4. 转换消息并调用 streamText
+  // Step 3: 调用 streamText（工具被限制为当前状态允许的子集）
   const modelMessages = await convertToModelMessages(messages);
 
   const result = streamText({
@@ -280,15 +357,8 @@ export async function POST(req: Request) {
     system: systemPrompt,
     messages: modelMessages,
     tools,
-    // stepCount 控制：
-    // - analyzing/planning: 1 步（调完工具就停，前端自动推进到下一状态）
-    // - awaiting_scenario/awaiting_assets: 1 步（调前端工具就停，等待用户操作）
-    // - generating: 5 步（需要连续调用多个生成工具）
-    // - editing: 2 步（调 reviseAsset + 说一句"已修改"）
-    stopWhen: stepCountIs(
-      ctx.state === "generating" ? 5 :
-      ctx.state === "editing" ? 2 : 1
-    ),
+    // 生成阶段可能需要连续调用多个工具（讲稿 + PPT + One-pager）
+    stopWhen: stepCountIs(state === "generating" ? 5 : 3),
   });
 
   return result.toUIMessageStreamResponse();

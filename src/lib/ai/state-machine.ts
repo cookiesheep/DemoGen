@@ -1,156 +1,166 @@
-// 状态机模块 — 从消息历史推导 Agent 当前状态，返回该状态的工具集和 prompt
-// 核心思想：代码控制流程，LLM 只负责生成内容
-// 每次请求到达后端时，扫描消息历史中已完成的工具调用，推导出当前阶段
-// 然后只给 LLM 该阶段允许的工具和一个极简 prompt
+// 状态机模块 — DemoGen Agent 的流程控制核心
+//
+// ===== 设计原理 =====
+//
+// 传统 Agent 架构让 LLM 自己决定"下一步做什么"（给它所有工具 + 一个大 prompt）。
+// 这依赖 LLM 的 prompt 遵从性，弱模型（如 DeepSeek）经常失控。
+//
+// 状态机架构反过来：**代码**决定流程，LLM 只负责**生成内容**。
+// 具体做法：
+//   1. 每次 API 请求到达时，从消息历史中推导"当前状态"
+//   2. 根据状态，只给 LLM 该状态下允许的工具
+//   3. 给 LLM 一个极简的状态专用 prompt（1-2 句话）
+//
+// 这样 LLM 无法"走偏"——因为错误的工具根本不存在于当前调用中。
+//
+// ===== 状态流转 =====
+//
+// ANALYZING → AWAITING_SCENARIO → PLANNING → AWAITING_ASSETS → GENERATING → EDITING
+//
+// 每个状态的进入条件是"上一步的工具已完成"。
+// 推导逻辑是纯函数：输入是消息历史，输出是状态枚举。
+// 后端无需存储状态——每次从消息历史重新推导。
+
 import type { UIMessage } from "ai";
 
-// ========== 状态定义 ==========
+// ========== 状态枚举 ==========
+// 每个状态代表 Agent 流程中的一个步骤
 export type AgentState =
-  | "analyzing"         // 分析项目
-  | "awaiting_scenario" // 等待用户选择场景
-  | "planning"          // 生成展示策略
-  | "awaiting_assets"   // 等待用户确认资产
-  | "generating"        // 批量生成资产
-  | "editing";          // 编辑和修改阶段
+  | "analyzing"         // 正在分析项目（需要调用 analyzeProject）
+  | "awaiting_scenario" // 等待用户选择展示场景（需要调用 askUserChoice）
+  | "planning"          // 正在规划展示策略（需要调用 planStrategy）
+  | "awaiting_assets"   // 等待用户确认要生成的资产（需要调用 confirmAssets）
+  | "generating"        // 正在生成资产（需要调用 generateScript/PPT/OnePager）
+  | "editing";          // 所有资产已生成，用户可以修改（需要调用 reviseAsset）
 
-// 从消息历史中提取的上下文信息
-export interface StateContext {
-  state: AgentState;
-  selectedAssets: string[];   // 用户选中的资产类型列表（如 ["script", "ppt"]）
-  generatedAssets: Set<string>; // 已生成的资产类型集合
+// ========== 从消息历史中提取已完成的工具调用 ==========
+//
+// 原理：assistant-ui 每次发送请求时，会把完整的消息历史传给后端。
+// 消息中的 assistant 消息包含 parts 数组，其中工具调用的 part 格式为：
+//   { type: "tool-invocation", toolInvocation: { toolName, state, result } }
+//
+// 当 state === "result" 时，表示工具已执行完成。
+// 我们遍历所有消息，收集已完成的工具名和它们的返回值。
+
+interface CompletedToolCall {
+  toolName: string;
+  result: Record<string, unknown>;
 }
 
-// ========== 状态推导 ==========
-// 扫描所有消息中已完成的工具调用，根据完成情况推导当前状态
+function extractCompletedToolCalls(messages: UIMessage[]): CompletedToolCall[] {
+  const completed: CompletedToolCall[] = [];
 
-export function deriveState(messages: UIMessage[]): StateContext {
-  const completed = new Set<string>();   // 已完成的工具名
-  let selectedAssets: string[] = [];     // 用户选中的资产
-  const generatedAssets = new Set<string>(); // 已生成的资产类型
+  for (const message of messages) {
+    // 只看 assistant 消息（工具调用都在 assistant 消息中）
+    if (message.role !== "assistant") continue;
 
-  // 遍历所有消息，提取已完成的工具调用
-  for (const msg of messages) {
-    if (!msg.parts) continue;
-    for (const part of msg.parts) {
-      // UIMessage 的 part 类型是联合类型，工具调用的 part 有 toolInvocation 字段
-      // 但实际传输时，part.type 可能是 "tool-invocation"，需要检查多种格式
-      const p = part as Record<string, unknown>;
-
-      // 检查 toolInvocation 格式（assistant-ui 传过来的格式）
-      if (p.toolInvocation && typeof p.toolInvocation === "object") {
-        const inv = p.toolInvocation as Record<string, unknown>;
-        const toolName = inv.toolName as string;
-        const state = inv.state as string;
-
-        if (state === "result" || state === "output-available") {
-          completed.add(toolName);
-
-          // 从 confirmAssets 结果中提取用户选择的资产
-          if (toolName === "confirmAssets" && inv.result) {
-            const result = inv.result as { selectedAssets?: string[] };
-            if (result.selectedAssets) {
-              selectedAssets = result.selectedAssets;
-            }
-          }
-
-          // 记录已生成的资产类型
-          if (toolName === "generateScript") generatedAssets.add("script");
-          if (toolName === "generatePPT") generatedAssets.add("ppt");
-          if (toolName === "generateOnePager") generatedAssets.add("onepager");
-        }
-      }
-
-      // 也检查 tool-result 格式（convertToModelMessages 转换后的格式可能不同）
-      if (p.type === "tool-result" || (typeof p.type === "string" && (p.type as string).startsWith("tool-"))) {
-        const toolName = (p.toolName as string) || (typeof p.type === "string" ? (p.type as string).replace("tool-", "") : "");
-        if (toolName && (p.result !== undefined || p.output !== undefined)) {
-          completed.add(toolName);
-
-          if (toolName === "confirmAssets") {
-            const result = (p.result || p.output) as { selectedAssets?: string[] };
-            if (result?.selectedAssets) {
-              selectedAssets = result.selectedAssets;
-            }
-          }
-          if (toolName === "generateScript") generatedAssets.add("script");
-          if (toolName === "generatePPT") generatedAssets.add("ppt");
-          if (toolName === "generateOnePager") generatedAssets.add("onepager");
+    for (const part of message.parts) {
+      // AI SDK v6 的 UIMessage part 中，工具调用类型为 "tool-invocation"
+      // toolInvocation 包含 toolName, state, result 等字段
+      if (
+        part.type === "tool-invocation" &&
+        "toolInvocation" in part
+      ) {
+        const invocation = part.toolInvocation as {
+          toolName: string;
+          state: string;
+          result?: Record<string, unknown>;
+        };
+        // state === "result" 表示工具已执行完成且有返回值
+        if (invocation.state === "result" && invocation.result) {
+          completed.push({
+            toolName: invocation.toolName,
+            result: invocation.result,
+          });
         }
       }
     }
   }
 
-  // 根据已完成的工具调用推导状态
-  if (!completed.has("analyzeProject")) {
-    return { state: "analyzing", selectedAssets, generatedAssets };
+  return completed;
+}
+
+// ========== 从已完成的工具中提取业务数据 ==========
+// 用于在 generating 状态判断哪些资产已经生成了
+
+// 获取用户在 confirmAssets 中选择的资产类型列表
+function getSelectedAssets(completedCalls: CompletedToolCall[]): string[] {
+  // 找到最后一次 confirmAssets 的结果
+  const confirmCall = [...completedCalls]
+    .reverse()
+    .find((c) => c.toolName === "confirmAssets");
+
+  if (!confirmCall) return [];
+  const result = confirmCall.result as { selectedAssets?: string[] };
+  return result.selectedAssets || [];
+}
+
+// 获取已经生成的资产类型集合
+function getGeneratedAssets(completedCalls: CompletedToolCall[]): Set<string> {
+  const generated = new Set<string>();
+  for (const call of completedCalls) {
+    if (call.toolName === "generateScript") generated.add("script");
+    if (call.toolName === "generatePPT") generated.add("ppt");
+    if (call.toolName === "generateOnePager") generated.add("onepager");
   }
-  if (!completed.has("askUserChoice")) {
-    return { state: "awaiting_scenario", selectedAssets, generatedAssets };
-  }
-  if (!completed.has("planStrategy")) {
-    return { state: "planning", selectedAssets, generatedAssets };
-  }
-  if (!completed.has("confirmAssets")) {
-    return { state: "awaiting_assets", selectedAssets, generatedAssets };
+  return generated;
+}
+
+// ========== 核心函数：推导当前状态 ==========
+//
+// 原理：这是一个纯函数——给定消息历史，确定性地返回状态。
+// 从"已完成的工具列表"逐步检查每个里程碑是否达成：
+//   有 analyzeProject 完成？→ 分析阶段结束
+//   有 askUserChoice 完成？→ 场景选择阶段结束
+//   有 planStrategy 完成？→ 策略阶段结束
+//   有 confirmAssets 完成？→ 资产确认阶段结束
+//   所有选中的资产都生成了？→ 生成阶段结束
+//
+// 如果某个里程碑未达成，就停在对应状态。
+
+export function deriveState(messages: UIMessage[]): AgentState {
+  const completedCalls = extractCompletedToolCalls(messages);
+
+  // 用 Set 快速查找某个工具是否已完成
+  const completedToolNames = new Set(completedCalls.map((c) => c.toolName));
+
+  // 逐步检查里程碑
+  if (!completedToolNames.has("analyzeProject")) {
+    return "analyzing";
   }
 
-  // 检查是否所有选中的资产都已生成
+  if (!completedToolNames.has("askUserChoice")) {
+    return "awaiting_scenario";
+  }
+
+  if (!completedToolNames.has("planStrategy")) {
+    return "planning";
+  }
+
+  if (!completedToolNames.has("confirmAssets")) {
+    return "awaiting_assets";
+  }
+
+  // 检查资产生成进度
+  const selectedAssets = getSelectedAssets(completedCalls);
+  const generatedAssets = getGeneratedAssets(completedCalls);
   const allGenerated = selectedAssets.length > 0 &&
-    selectedAssets.every((a) => generatedAssets.has(a));
+    selectedAssets.every((asset) => generatedAssets.has(asset));
 
   if (!allGenerated) {
-    return { state: "generating", selectedAssets, generatedAssets };
+    return "generating";
   }
 
-  return { state: "editing", selectedAssets, generatedAssets };
+  // 所有资产已生成，进入编辑模式
+  return "editing";
 }
 
-// ========== 状态专用 Prompt ==========
-// 每个状态只有 1-3 句话的 prompt，LLM 不需要理解整个流程
+// ========== 获取 generating 状态下还需要生成的资产 ==========
+// 用于告诉 LLM "你还需要生成哪些资产"
 
-const STATE_PROMPTS: Record<AgentState, string> = {
-  analyzing: `你是 DemoGen Agent。立即调用 analyzeProject 工具分析用户提交的项目资料。不要输出任何文字，直接调用工具。`,
-
-  awaiting_scenario: `你是 DemoGen Agent。调用 askUserChoice 工具让用户选择展示场景。
-question 设为 "请选择你的展示场景："，options 设为 ["课程答辩", "面试展示", "开源推广", "产品发布", "团队汇报"]。
-不要输出任何文字，直接调用工具。`,
-
-  planning: `你是 DemoGen Agent。立即调用 planStrategy 工具生成展示策略。
-从之前的对话历史中获取 analyzeProject 的结果作为项目信息，从 askUserChoice 的结果中获取用户选择的场景。
-不要输出任何文字，直接调用工具。`,
-
-  awaiting_assets: `你是 DemoGen Agent。调用 confirmAssets 工具，把之前 planStrategy 返回结果中的 recommendedAssets 原样传给用户确认。
-不要输出任何文字，直接调用工具。`,
-
-  generating: `你是 DemoGen Agent。根据用户确认的资产列表（confirmAssets 的结果中 selectedAssets），依次调用对应的生成工具：
-- "script" → generateScript
-- "ppt" → generatePPT
-- "onepager" → generateOnePager
-不要输出任何文字，只调用工具。从对话历史中获取所需的项目信息和策略信息。`,
-
-  editing: `你是 DemoGen Agent。用户已完成资产生成，现在处于编辑阶段。
-当用户要求修改资产时，立即调用 reviseAsset 工具。从之前的工具调用历史中获取当前资产内容作为 currentContent。
-修改完成后只回复："已修改，请查看右侧。"
-不要自己输出任何资产内容，不要输出长文本。
-如果用户想重新开始，告诉他刷新页面即可。`,
-};
-
-export function getStatePrompt(state: AgentState): string {
-  return STATE_PROMPTS[state];
-}
-
-// ========== 状态允许的工具名 ==========
-// 每个状态只返回允许的工具名列表，route.ts 用它来过滤工具
-
-const STATE_TOOLS: Record<AgentState, string[]> = {
-  analyzing: ["analyzeProject"],
-  awaiting_scenario: ["askUserChoice"],
-  planning: ["planStrategy"],
-  awaiting_assets: ["confirmAssets"],
-  generating: ["generateScript", "generatePPT", "generateOnePager"],
-  editing: ["reviseAsset"],
-};
-
-export function getStateToolNames(state: AgentState): string[] {
-  return STATE_TOOLS[state];
+export function getRemainingAssets(messages: UIMessage[]): string[] {
+  const completedCalls = extractCompletedToolCalls(messages);
+  const selectedAssets = getSelectedAssets(completedCalls);
+  const generatedAssets = getGeneratedAssets(completedCalls);
+  return selectedAssets.filter((asset) => !generatedAssets.has(asset));
 }
