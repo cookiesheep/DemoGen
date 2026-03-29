@@ -79,9 +79,10 @@ export const STATE_PROMPTS: Record<AgentState, string> = {
 完成后只说："已完成分析。"`,
 
   // 等待场景选择：只有 askUserChoice 可用
+  // 参数必须严格固定，不能让 LLM 自己编问题
   awaiting_scenario: `${BASE_RULES}
-你的任务：调用 askUserChoice 工具让用户选择展示场景。
-参数：question="请选择你的展示场景：" options=["课程答辩","面试展示","开源推广","产品发布","团队汇报"]`,
+你的唯一任务：调用 askUserChoice 工具。参数必须严格按以下 JSON 传入，不要修改任何内容：
+{"question":"请选择你的展示场景：","options":["课程答辩","面试展示","开源推广","产品发布","团队汇报"]}`,
 
   // 策略规划：只有 planStrategy 可用
   planning: `${BASE_RULES}
