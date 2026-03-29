@@ -3,7 +3,7 @@
 "use client";
 
 import { createContext, useContext, useState, useCallback } from "react";
-import type { ProjectUnderstanding } from "@/lib/ai/schemas";
+import type { ProjectUnderstanding, DisplayStrategy } from "@/lib/ai/schemas";
 
 // 预览面板可展示的资产类型
 export type AssetType = "project" | "strategy" | "script" | "ppt" | "onepager";
@@ -13,12 +13,14 @@ interface PreviewState {
   activeAsset: AssetType | null;
   // 各类资产的数据
   projectUnderstanding: ProjectUnderstanding | null;
-  // 后续扩展：strategy, script, ppt, onepager...
+  displayStrategy: DisplayStrategy | null;
+  // 后续扩展：script, ppt, onepager...
 }
 
 interface PreviewContextValue extends PreviewState {
   setActiveAsset: (asset: AssetType) => void;
   setProjectUnderstanding: (data: ProjectUnderstanding) => void;
+  setDisplayStrategy: (data: DisplayStrategy) => void;
 }
 
 const PreviewContext = createContext<PreviewContextValue | null>(null);
@@ -27,6 +29,7 @@ export function PreviewProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<PreviewState>({
     activeAsset: null,
     projectUnderstanding: null,
+    displayStrategy: null,
   });
 
   const setActiveAsset = useCallback((asset: AssetType) => {
@@ -38,8 +41,18 @@ export function PreviewProvider({ children }: { children: React.ReactNode }) {
       setState((prev) => ({
         ...prev,
         projectUnderstanding: data,
-        // 自动切换到项目理解视图
         activeAsset: "project",
+      }));
+    },
+    []
+  );
+
+  const setDisplayStrategy = useCallback(
+    (data: DisplayStrategy) => {
+      setState((prev) => ({
+        ...prev,
+        displayStrategy: data,
+        activeAsset: "strategy",
       }));
     },
     []
@@ -51,6 +64,7 @@ export function PreviewProvider({ children }: { children: React.ReactNode }) {
         ...state,
         setActiveAsset,
         setProjectUnderstanding,
+        setDisplayStrategy,
       }}
     >
       {children}

@@ -12,7 +12,7 @@ const openai = createOpenAI({
   baseURL: process.env.OPENAI_BASE_URL,
 });
 
-const model = openai.chat(process.env.OPENAI_MODEL || "gpt-4o");
+const model = openai.chat(process.env.OPENAI_MODEL || "gpt-5.2");
 
 // Subagent 输入：可以是 GitHub 数据、文档、描述的组合
 interface AnalysisInput {

@@ -47,3 +47,53 @@ export const projectUnderstandingSchema = z.object({
 // 从 Schema 推导 TypeScript 类型
 export type ProjectUnderstanding = z.infer<typeof projectUnderstandingSchema>;
 export type ProjectType = z.infer<typeof projectTypeEnum>;
+
+// ========== 展示场景枚举 ==========
+export const scenarioEnum = z.enum([
+  "course-defense",    // 课程答辩
+  "job-interview",     // 面试展示
+  "open-source-promo", // 开源推广
+  "product-launch",    // 产品发布
+  "team-report",       // 团队汇报
+  "custom",            // 自定义
+]);
+
+export type Scenario = z.infer<typeof scenarioEnum>;
+
+// ========== 展示策略 Schema — Strategy Subagent 的输出格式 ==========
+export const displayStrategySchema = z.object({
+  // 展示场景
+  scenario: scenarioEnum.describe("选中的展示场景"),
+  // 场景中文名称
+  scenarioLabel: z.string().describe("场景的中文名称，如'课程答辩'"),
+  // 观众画像（评委/面试官/社区开发者等）
+  audienceProfile: z.string().describe("目标观众画像描述，1-2 句话"),
+  // 推荐的资产组合
+  recommendedAssets: z
+    .array(
+      z.object({
+        type: z.enum(["script", "ppt", "onepager"]).describe("资产类型"),
+        label: z.string().describe("资产中文名称"),
+        reason: z.string().describe("为什么推荐这个资产，一句话"),
+      })
+    )
+    .describe("推荐生成的资产列表"),
+  // 展示重点方向
+  emphasisPoints: z
+    .array(z.string())
+    .describe("展示时应该重点强调的方向，2-3 个"),
+  // 预估展示结构
+  estimatedStructure: z
+    .array(
+      z.object({
+        section: z.string().describe("段落名称"),
+        duration: z.string().describe("建议时长，如'2分钟'"),
+        keyPoints: z.array(z.string()).describe("该段落的要点，1-3 个"),
+      })
+    )
+    .describe("建议的展示结构和时间分配"),
+  // 总时长建议
+  totalDuration: z.string().describe("建议总时长，如'8-10分钟'"),
+});
+
+export type DisplayStrategy = z.infer<typeof displayStrategySchema>;
