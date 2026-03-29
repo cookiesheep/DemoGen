@@ -349,17 +349,58 @@ export async function POST(req: Request) {
     systemPrompt += `\n还需要生成：${remainingList}。`;
   }
 
-  // Step 3: 调用 streamText（工具被限制为当前状态允许的子集）
+  // Step 3: 调用 streamText
   const modelMessages = await convertToModelMessages(messages);
+
+  // ===== 关键控制：stepCountIs + toolChoice =====
+  //
+  // stepCountIs(N) 控制"LLM 可以执行几轮工具调用"。
+  // 一个 step = LLM 生成 → 工具执行 → 结果返回。
+  //
+  // 如果 stepCountIs(3)，工具完成后 LLM 还有 2 步可用，
+  // 它会利用这些步骤输出大段文字（因为没有别的工具可调了）。
+  //
+  // 修复：
+  // - 单工具状态用 stepCountIs(1)：工具完成后直接停，LLM 没机会输出文字
+  // - generating 用 stepCountIs(5)：需要连续调用多个生成工具
+  // - editing 用 stepCountIs(2)：调 reviseAsset + 说一句"已修改"
+  //
+  // toolChoice 控制"LLM 是否必须调用工具"。
+  // - "required"：强制调工具，不能只输出文字
+  // - "auto"：LLM 自己决定（editing 状态需要，因为用户可能只是聊天）
+  //
+  // 两者结合：analyzing 状态 = stepCountIs(1) + toolChoice:"required"
+  // → LLM 被迫调 analyzeProject，调完后直接停。零废话。
+
+  const stateConfig = STATE_STREAM_CONFIG[state];
 
   const result = streamText({
     model,
     system: systemPrompt,
     messages: modelMessages,
     tools,
-    // 生成阶段可能需要连续调用多个工具（讲稿 + PPT + One-pager）
-    stopWhen: stepCountIs(state === "generating" ? 5 : 3),
+    stopWhen: stepCountIs(stateConfig.maxSteps),
+    toolChoice: stateConfig.toolChoice,
   });
 
   return result.toUIMessageStreamResponse();
 }
+
+// 每个状态的 streamText 配置
+const STATE_STREAM_CONFIG: Record<
+  string,
+  { maxSteps: number; toolChoice: "auto" | "required" }
+> = {
+  // 分析：强制调 analyzeProject，调完停
+  analyzing:        { maxSteps: 1, toolChoice: "required" },
+  // 场景选择：强制调 askUserChoice（前端工具），调完停
+  awaiting_scenario: { maxSteps: 1, toolChoice: "required" },
+  // 策略规划：强制调 planStrategy，调完停
+  planning:         { maxSteps: 1, toolChoice: "required" },
+  // 资产确认：强制调 confirmAssets（前端工具），调完停
+  awaiting_assets:  { maxSteps: 1, toolChoice: "required" },
+  // 生成资产：强制调工具，可连续调多个（讲稿+PPT+一页纸）
+  generating:       { maxSteps: 5, toolChoice: "required" },
+  // 编辑模式：用户可能聊天也可能要修改，所以 auto
+  editing:          { maxSteps: 2, toolChoice: "auto" },
+};
