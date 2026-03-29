@@ -26,19 +26,42 @@ type Phase =
 
 // ========== 从消息历史中提取工具调用结果 ==========
 
-// 扫描 UIMessage parts，找到指定工具的最新结果
+// AI SDK v6 UIMessage 中 tool part 的结构：
+// - type: "tool-{toolName}" (如 "tool-analyzeProject")
+// - state: "output-available" 表示工具已完成
+// - output: 工具返回值
+// 注意：也可能是 DynamicToolUIPart (type: "dynamic-tool", toolName 在字段上)
+
 function getToolResult(messages: UIMessage[], toolName: string): unknown | null {
-  // 倒序扫描，找最新的结果
+  const staticType = `tool-${toolName}`;
+
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     const parts = msg.parts || [];
     for (const part of parts) {
-      if (
-        part.type === "tool-invocation" &&
-        (part as { toolName?: string }).toolName === toolName &&
-        (part as { state?: string }).state === "result"
-      ) {
-        return (part as { result?: unknown }).result;
+      const p = part as Record<string, unknown>;
+
+      // 格式 1 — 静态工具: type="tool-{name}", state="output-available", output={...}
+      if (p.type === staticType && p.state === "output-available") {
+        return p.output;
+      }
+
+      // 格式 2 — 动态工具: type="dynamic-tool", toolName="{name}"
+      if (p.type === "dynamic-tool" && p.toolName === toolName && p.state === "output-available") {
+        return p.output;
+      }
+
+      // 格式 3 — 兼容旧版 assistant-ui: type="tool-invocation"
+      if (p.type === "tool-invocation") {
+        // toolInvocation 包装格式
+        const inv = p.toolInvocation as Record<string, unknown> | undefined;
+        if (inv && inv.toolName === toolName && inv.state === "result") {
+          return inv.result;
+        }
+        // 或者直接在 part 上
+        if (p.toolName === toolName && p.state === "result") {
+          return p.result;
+        }
       }
     }
   }
