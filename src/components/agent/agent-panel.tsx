@@ -5,13 +5,16 @@
 import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
 import { AssistantChatTransport } from "@assistant-ui/react-ai-sdk";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import { lastAssistantMessageIsCompleteWithToolCalls } from "ai";
 import { Thread } from "./thread";
 
 export function AgentPanel() {
   // 连接后端 /api/agent 接口
-  // 注意：useChatRuntime 通过 transport 配置 API 地址，默认是 /api/chat
   const runtime = useChatRuntime({
     transport: new AssistantChatTransport({ api: "/api/agent" }),
+    // 当前端工具（如 askUserChoice）的结果被添加后，自动重新发送消息继续 Agent 流程
+    // 这样用户选择场景后，Agent 能自动推进到下一步
+    sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
   });
 
   return (
