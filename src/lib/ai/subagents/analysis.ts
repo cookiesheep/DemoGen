@@ -1,9 +1,8 @@
 // Analysis Subagent — 分析项目资料，生成结构化的项目理解
-// 内部调用 generateObject + Zod schema，确保输出格式正确
-import { generateObject } from "ai";
+// 使用 generateObjectCompat 兼容不支持 json_schema 的中转 API
 import { projectUnderstandingSchema, type ProjectUnderstanding } from "../schemas";
 import { ANALYSIS_PROMPT } from "../prompts";
-import { model } from "../client";
+import { generateObjectCompat } from "../generate-object-compat";
 import type { GitHubRepoData } from "../../github/analyzer";
 
 // Subagent 输入：可以是 GitHub 数据、文档、描述的组合
@@ -15,7 +14,6 @@ interface AnalysisInput {
 
 /**
  * 分析项目资料，返回结构化的项目理解
- * 使用 generateObject 确保输出符合 Zod schema
  */
 export async function analyzeProject(
   input: AnalysisInput
@@ -54,13 +52,9 @@ ${gh.packageJson ? JSON.stringify(gh.packageJson, null, 2).slice(0, 2000) : "无
 
   const material = materialParts.join("\n\n");
 
-  // 调用 AI 生成结构化的项目理解
-  const result = await generateObject({
-    model,
+  return generateObjectCompat({
     system: ANALYSIS_PROMPT,
     prompt: `请分析以下项目资料，生成结构化的项目理解：\n\n${material}`,
     schema: projectUnderstandingSchema,
   });
-
-  return result.object;
 }

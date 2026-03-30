@@ -1,9 +1,8 @@
 // PPT Architect Subagent — 生成 PPT 大纲
-// 使用 generateObject + Zod schema 确保结构化输出
-import { generateObject } from "ai";
-import { model } from "../client";
+// 使用 generateObjectCompat 兼容不支持 json_schema 的中转 API
 import { pptOutlineSchema, type PptOutline, type ProjectUnderstanding, type DisplayStrategy } from "../schemas";
 import { PPT_PROMPT } from "../prompts";
+import { generateObjectCompat } from "../generate-object-compat";
 
 interface PptInput {
   projectUnderstanding: ProjectUnderstanding;
@@ -36,12 +35,9 @@ ${input.displayStrategy.estimatedStructure
 
 请设计 PPT 大纲。`;
 
-  const result = await generateObject({
-    model,
+  return generateObjectCompat({
     system: PPT_PROMPT,
     prompt,
     schema: pptOutlineSchema,
   });
-
-  return result.object;
 }

@@ -1,6 +1,5 @@
 // Strategy Subagent — 根据项目理解和展示场景，生成展示策略
-// 使用 generateObject + Zod schema 确保输出格式正确
-import { generateObject } from "ai";
+// 使用 generateObjectCompat 兼容不支持 json_schema 的中转 API
 import {
   displayStrategySchema,
   type DisplayStrategy,
@@ -8,7 +7,7 @@ import {
   type Scenario,
 } from "../schemas";
 import { STRATEGY_PROMPT } from "../prompts";
-import { model } from "../client";
+import { generateObjectCompat } from "../generate-object-compat";
 
 // 场景中文名映射
 const SCENARIO_LABELS: Record<string, Scenario> = {
@@ -49,12 +48,9 @@ ${input.scenario}（场景代码：${scenarioKey}）
 
 请根据以上信息，规划展示策略。`;
 
-  const result = await generateObject({
-    model,
+  return generateObjectCompat({
     system: STRATEGY_PROMPT,
     prompt,
     schema: displayStrategySchema,
   });
-
-  return result.object;
 }

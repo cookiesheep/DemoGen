@@ -1,9 +1,8 @@
 // One-pager Designer Subagent — 生成项目一页纸
-// 使用 generateObject + Zod schema 确保结构化输出
-import { generateObject } from "ai";
-import { model } from "../client";
+// 使用 generateObjectCompat 兼容不支持 json_schema 的中转 API
 import { onePagerSchema, type OnePager, type ProjectUnderstanding, type DisplayStrategy } from "../schemas";
 import { ONEPAGER_PROMPT } from "../prompts";
+import { generateObjectCompat } from "../generate-object-compat";
 
 interface OnePagerInput {
   projectUnderstanding: ProjectUnderstanding;
@@ -30,12 +29,9 @@ export async function generateOnePager(
 
 请生成项目一页纸。`;
 
-  const result = await generateObject({
-    model,
+  return generateObjectCompat({
     system: ONEPAGER_PROMPT,
     prompt,
     schema: onePagerSchema,
   });
-
-  return result.object;
 }
