@@ -13,6 +13,15 @@
 // 关键洞察：流程控制由代码负责，LLM 只负责生成内容。
 // 这让弱模型也能可靠地工作，因为"调用唯一可用的工具"远比
 // "从 9 个工具中选对的那个"简单得多。
+//
+// ===== Bug 2 & 3 修复 =====
+//
+// 旧方案：planStrategy/generate*/reviseAsset 的 inputSchema 有大量字段，
+// 要求 LLM 从对话历史中提取。弱模型经常漏字段、填错、幻觉。
+//
+// 新方案：工具参数由代码从消息历史中提取（辅助函数 + 闭包注入）。
+// LLM 只需"调用工具"这一个动作，不需要填任何上下文参数。
+// planStrategy/generate* 的 inputSchema 为空，reviseAsset 只需 assetType + instructions。
 
 import { streamText, tool, UIMessage, stepCountIs, convertToModelMessages, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { z } from "zod";
@@ -26,268 +35,337 @@ import { reviseScript, revisePpt, reviseOnePager } from "@/lib/ai/revise";
 import { STATE_PROMPTS } from "@/lib/ai/prompts";
 import { model } from "@/lib/ai/client";
 import { deriveState, getRemainingAssets } from "@/lib/ai/state-machine";
-import type { ProjectType } from "@/lib/ai/schemas";
+import type { ProjectUnderstanding, DisplayStrategy } from "@/lib/ai/schemas";
 import type { ToolSet } from "ai";
 
-// ========== 工具定义 ==========
-// 所有工具的定义放在这里，route handler 根据状态选择子集传给 streamText
-// 工具本身的逻辑不变——变的只是"哪些工具当前可见"
+// ========== 辅助函数：从消息历史中提取已完成工具的结构化结果 ==========
+//
+// 原理：每个工具完成后，结果会作为 tool part 存在消息历史中。
+// 格式：{ type: "tool-{toolName}", output: { success: true, data: ... } }
+// 这些函数倒序遍历消息，找到最近一次成功的工具输出。
+//
+// 这是 Bug 2 修复的核心——把"LLM 从历史提取参数"变成"代码从历史提取参数"。
 
-const ALL_TOOLS = {
-  // 分析项目（analyzing 状态使用）
-  analyzeProject: tool({
-    description:
-      "分析用户提交的项目资料（GitHub 链接、文档、描述），生成结构化的项目理解",
-    inputSchema: z.object({
-      githubUrl: z.string().optional().describe("GitHub 仓库链接"),
-      description: z.string().optional().describe("用户对项目的文字描述"),
-      documents: z.array(z.string()).optional().describe("用户上传的文档内容"),
-    }),
-    execute: async ({ githubUrl, description, documents }) => {
-      let githubData = undefined;
-      if (githubUrl) {
-        const parsed = parseGitHubUrl(githubUrl);
-        if (!parsed) {
-          return { error: "无法解析 GitHub 链接，请检查格式" };
+// 提取 analyzeProject 工具的输出（项目理解）
+function extractProjectUnderstanding(messages: UIMessage[]): ProjectUnderstanding | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (const part of msg.parts) {
+      const p = part as Record<string, unknown>;
+      if (p.type === "tool-analyzeProject" && p.output) {
+        const output = p.output as { success?: boolean; data?: ProjectUnderstanding };
+        if (output.success && output.data) return output.data;
+      }
+    }
+  }
+  return null;
+}
+
+// 提取 askUserChoice 工具的输出（用户选择的展示场景）
+function extractScenario(messages: UIMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (const part of msg.parts) {
+      const p = part as Record<string, unknown>;
+      if (p.type === "tool-askUserChoice" && p.output) {
+        const output = p.output as { selectedOption?: string };
+        if (output.selectedOption) return output.selectedOption;
+      }
+    }
+  }
+  return null;
+}
+
+// 提取 planStrategy 工具的输出（展示策略）
+function extractStrategy(messages: UIMessage[]): DisplayStrategy | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (const part of msg.parts) {
+      const p = part as Record<string, unknown>;
+      if (p.type === "tool-planStrategy" && p.output) {
+        const output = p.output as { success?: boolean; data?: DisplayStrategy };
+        if (output.success && output.data) return output.data;
+      }
+    }
+  }
+  return null;
+}
+
+// 提取某种资产的最新内容（优先找 reviseAsset 的修改版本，再找 generate* 的原始版本）
+// Bug 3 修复：reviseAsset 不再要求 LLM 搬运 currentContent，代码自动提取
+function extractLatestAsset(messages: UIMessage[], assetType: string): string | null {
+  // generate* 工具名映射
+  const generateToolMap: Record<string, string> = {
+    script: "tool-generateScript",
+    ppt: "tool-generatePPT",
+    onepager: "tool-generateOnePager",
+  };
+
+  // 倒序搜索：先找到的就是最新版本
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (const part of msg.parts) {
+      const p = part as Record<string, unknown>;
+      const partType = p.type as string;
+
+      // 优先检查 reviseAsset 的输出（可能已被修改过多次）
+      if (partType === "tool-reviseAsset" && p.output) {
+        const output = p.output as { success?: boolean; assetType?: string; data?: unknown };
+        if (output.success && output.assetType === assetType) {
+          return typeof output.data === "string" ? output.data : JSON.stringify(output.data);
+        }
+      }
+
+      // 再检查 generate* 的原始输出
+      if (partType === generateToolMap[assetType] && p.output) {
+        const output = p.output as { success?: boolean; data?: unknown };
+        if (output.success) {
+          return typeof output.data === "string" ? output.data : JSON.stringify(output.data);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// 从消息历史中提取 planStrategy 返回的 recommendedAssets（awaiting_assets 状态用）
+function extractRecommendedAssets(messages: UIMessage[]): { type: string; label: string; reason: string }[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    for (const part of msg.parts) {
+      const p = part as Record<string, unknown>;
+      if (p.type === "tool-planStrategy" && p.output) {
+        const output = p.output as { success?: boolean; data?: { recommendedAssets?: { type: string; label: string; reason: string }[] } };
+        if (output.success && output.data?.recommendedAssets) {
+          return output.data.recommendedAssets;
+        }
+      }
+    }
+  }
+  return [];
+}
+
+// ========== 动态工具构建 ==========
+//
+// 旧方案：ALL_TOOLS 是静态常量，工具定义在模块加载时就确定了。
+// 问题：planStrategy/generate*/reviseAsset 需要从消息历史提取上下文，
+//       但静态工具拿不到每次请求的 messages。
+//
+// 新方案：buildTools(messages) 在每次请求时构建工具。
+// 通过闭包把 messages 和提取的上下文注入到工具的 execute 函数中。
+// analyzeProject 和前端工具不需要上下文，仍然是固定的。
+
+function buildTools(messages: UIMessage[]) {
+  // 提前从消息历史中提取所有上下文（避免每个工具重复提取）
+  const understanding = extractProjectUnderstanding(messages);
+  const scenario = extractScenario(messages);
+  const strategy = extractStrategy(messages);
+
+  return {
+    // ===== analyzeProject：LLM 从用户输入提取参数（这是合理的） =====
+    // 用户的 GitHub 链接/描述/文档在用户消息中，LLM 提取这些是它擅长的
+    analyzeProject: tool({
+      description: "分析用户提交的项目资料（GitHub 链接、文档、描述），生成结构化的项目理解",
+      inputSchema: z.object({
+        githubUrl: z.string().optional().describe("GitHub 仓库链接"),
+        description: z.string().optional().describe("用户对项目的文字描述"),
+        documents: z.array(z.string()).optional().describe("用户上传的文档内容"),
+      }),
+      execute: async ({ githubUrl, description, documents }) => {
+        let githubData = undefined;
+        if (githubUrl) {
+          const parsed = parseGitHubUrl(githubUrl);
+          if (!parsed) {
+            return { error: "无法解析 GitHub 链接，请检查格式" };
+          }
+          try {
+            githubData = await analyzeRepo(parsed.owner, parsed.repo);
+          } catch (err) {
+            return { error: `获取 GitHub 仓库数据失败: ${err instanceof Error ? err.message : String(err)}` };
+          }
         }
         try {
-          githubData = await analyzeRepo(parsed.owner, parsed.repo);
-        } catch (err) {
+          const result = await analyzeProject({ githubData, description, documents });
           return {
-            error: `获取 GitHub 仓库数据失败: ${err instanceof Error ? err.message : String(err)}`,
+            success: true,
+            data: result,
+            summary: {
+              projectName: result.name,
+              projectType: result.type,
+              featureCount: result.coreFeatures.length,
+              highlightCount: result.highlights.length,
+              techStackCount: result.techStack.length,
+            },
           };
+        } catch (err) {
+          return { error: `AI 分析失败: ${err instanceof Error ? err.message : String(err)}` };
         }
-      }
-      try {
-        const understanding = await analyzeProject({ githubData, description, documents });
-        return {
-          success: true,
-          data: understanding,
-          summary: {
-            projectName: understanding.name,
-            projectType: understanding.type,
-            featureCount: understanding.coreFeatures.length,
-            highlightCount: understanding.highlights.length,
-            techStackCount: understanding.techStack.length,
-          },
-        };
-      } catch (err) {
-        return {
-          error: `AI 分析失败: ${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-    },
-  }),
-
-  // 场景选择（awaiting_scenario 状态使用，前端工具）
-  askUserChoice: tool({
-    description: "向用户展示选项并等待选择",
-    inputSchema: z.object({
-      question: z.string().describe("向用户展示的问题"),
-      options: z.array(z.string()).describe("可选项列表"),
+      },
     }),
-  }),
 
-  // 策略规划（planning 状态使用）
-  planStrategy: tool({
-    description: "根据项目理解和展示场景，规划展示策略",
-    inputSchema: z.object({
-      scenario: z.string().describe("用户选择的展示场景"),
-      projectName: z.string().describe("项目名称"),
-      projectSummary: z.string().describe("项目一句话总结"),
-      projectType: z.string().describe("项目类型"),
-      targetUsers: z.string().describe("目标用户"),
-      coreFeatures: z.array(z.string()).describe("核心功能列表"),
-      highlights: z.array(z.string()).describe("技术亮点"),
-      techStack: z.array(z.string()).describe("技术栈"),
-      risks: z.array(z.string()).describe("风险提醒"),
+    // ===== 前端工具（无 execute，由 UI 组件处理） =====
+    askUserChoice: tool({
+      description: "向用户展示选项并等待选择",
+      inputSchema: z.object({
+        question: z.string().describe("向用户展示的问题"),
+        options: z.array(z.string()).describe("可选项列表"),
+      }),
     }),
-    execute: async ({ scenario, projectName, projectSummary, projectType, targetUsers, coreFeatures, highlights, techStack, risks }) => {
-      try {
-        const strategy = await planStrategy({
-          scenario,
-          projectUnderstanding: {
-            name: projectName, summary: projectSummary,
-            type: projectType as ProjectType,
-            targetUsers, coreFeatures, highlights, techStack, risks,
-          },
-        });
-        return {
-          success: true,
-          data: strategy,
-          summary: {
-            scenarioLabel: strategy.scenarioLabel,
-            assetCount: strategy.recommendedAssets.length,
-            assetLabels: strategy.recommendedAssets.map((a) => a.label),
-            totalDuration: strategy.totalDuration,
-          },
-        };
-      } catch (err) {
-        return { error: `策略规划失败: ${err instanceof Error ? err.message : String(err)}` };
-      }
-    },
-  }),
 
-  // 资产确认（awaiting_assets 状态使用，前端工具）
-  confirmAssets: tool({
-    description: "向用户展示推荐的资产列表（多选），等待确认",
-    inputSchema: z.object({
-      recommendedAssets: z.array(z.object({
-        type: z.string().describe("资产类型：script/ppt/onepager"),
-        label: z.string().describe("资产中文名称"),
-        reason: z.string().describe("推荐理由"),
-      })).describe("推荐的资产列表"),
+    confirmAssets: tool({
+      description: "向用户展示推荐的资产列表（多选），等待确认",
+      inputSchema: z.object({
+        recommendedAssets: z.array(z.object({
+          type: z.string().describe("资产类型：script/ppt/onepager"),
+          label: z.string().describe("资产中文名称"),
+          reason: z.string().describe("推荐理由"),
+        })).describe("推荐的资产列表"),
+      }),
     }),
-  }),
 
-  // 生成讲稿（generating 状态使用）
-  generateScript: tool({
-    description: "生成完整的演讲稿（Markdown 格式）",
-    inputSchema: z.object({
-      projectName: z.string(), projectSummary: z.string(),
-      projectType: z.string(), targetUsers: z.string(),
-      coreFeatures: z.array(z.string()), highlights: z.array(z.string()),
-      techStack: z.array(z.string()),
-      scenario: z.string(), scenarioLabel: z.string(),
-      audienceProfile: z.string(), totalDuration: z.string(),
-      emphasisPoints: z.array(z.string()),
-      estimatedStructure: z.array(z.object({
-        section: z.string(), duration: z.string(), keyPoints: z.array(z.string()),
-      })),
-    }),
-    execute: async (input) => {
-      try {
-        const script = await generateScript({
-          projectUnderstanding: {
-            name: input.projectName, summary: input.projectSummary,
-            type: input.projectType as ProjectType,
-            targetUsers: input.targetUsers, coreFeatures: input.coreFeatures,
-            highlights: input.highlights, techStack: input.techStack, risks: [],
-          },
-          displayStrategy: {
-            scenario: input.scenario as "course-defense" | "job-interview" | "open-source-promo" | "product-launch" | "team-report" | "custom",
-            scenarioLabel: input.scenarioLabel, audienceProfile: input.audienceProfile,
-            totalDuration: input.totalDuration, emphasisPoints: input.emphasisPoints,
-            estimatedStructure: input.estimatedStructure, recommendedAssets: [],
-          },
-        });
-        return { success: true, data: script, summary: { charCount: script.length, estimatedMinutes: Math.round(script.length / 250) } };
-      } catch (err) {
-        return { error: `讲稿生成失败: ${err instanceof Error ? err.message : String(err)}` };
-      }
-    },
-  }),
-
-  // 生成 PPT 大纲（generating 状态使用）
-  generatePPT: tool({
-    description: "生成 PPT 大纲（每页标题、要点、布局）",
-    inputSchema: z.object({
-      projectName: z.string(), projectSummary: z.string(),
-      projectType: z.string(), targetUsers: z.string(),
-      coreFeatures: z.array(z.string()), highlights: z.array(z.string()),
-      techStack: z.array(z.string()),
-      scenario: z.string(), scenarioLabel: z.string(),
-      audienceProfile: z.string(), totalDuration: z.string(),
-      emphasisPoints: z.array(z.string()),
-      estimatedStructure: z.array(z.object({
-        section: z.string(), duration: z.string(), keyPoints: z.array(z.string()),
-      })),
-    }),
-    execute: async (input) => {
-      try {
-        const ppt = await generatePPT({
-          projectUnderstanding: {
-            name: input.projectName, summary: input.projectSummary,
-            type: input.projectType as ProjectType,
-            targetUsers: input.targetUsers, coreFeatures: input.coreFeatures,
-            highlights: input.highlights, techStack: input.techStack, risks: [],
-          },
-          displayStrategy: {
-            scenario: input.scenario as "course-defense" | "job-interview" | "open-source-promo" | "product-launch" | "team-report" | "custom",
-            scenarioLabel: input.scenarioLabel, audienceProfile: input.audienceProfile,
-            totalDuration: input.totalDuration, emphasisPoints: input.emphasisPoints,
-            estimatedStructure: input.estimatedStructure, recommendedAssets: [],
-          },
-        });
-        return { success: true, data: ppt, summary: { slideCount: ppt.totalSlides, title: ppt.title } };
-      } catch (err) {
-        return { error: `PPT 大纲生成失败: ${err instanceof Error ? err.message : String(err)}` };
-      }
-    },
-  }),
-
-  // 生成 One-pager（generating 状态使用）
-  generateOnePager: tool({
-    description: "生成项目一页纸（精炼的项目介绍）",
-    inputSchema: z.object({
-      projectName: z.string(), projectSummary: z.string(),
-      projectType: z.string(), targetUsers: z.string(),
-      coreFeatures: z.array(z.string()), highlights: z.array(z.string()),
-      techStack: z.array(z.string()),
-      scenario: z.string(), scenarioLabel: z.string(),
-      audienceProfile: z.string(),
-    }),
-    execute: async (input) => {
-      try {
-        const onepager = await generateOnePager({
-          projectUnderstanding: {
-            name: input.projectName, summary: input.projectSummary,
-            type: input.projectType as ProjectType,
-            targetUsers: input.targetUsers, coreFeatures: input.coreFeatures,
-            highlights: input.highlights, techStack: input.techStack, risks: [],
-          },
-          displayStrategy: {
-            scenario: input.scenario as "course-defense" | "job-interview" | "open-source-promo" | "product-launch" | "team-report" | "custom",
-            scenarioLabel: input.scenarioLabel, audienceProfile: input.audienceProfile,
-            totalDuration: "", emphasisPoints: [], estimatedStructure: [], recommendedAssets: [],
-          },
-        });
-        return { success: true, data: onepager, summary: { projectName: onepager.projectName, tagline: onepager.tagline } };
-      } catch (err) {
-        return { error: `One-pager 生成失败: ${err instanceof Error ? err.message : String(err)}` };
-      }
-    },
-  }),
-
-  // 修改资产（editing 状态使用）
-  reviseAsset: tool({
-    description: "根据用户指令修改已生成的资产",
-    inputSchema: z.object({
-      assetType: z.enum(["script", "ppt", "onepager"]).describe("资产类型"),
-      currentContent: z.string().describe("当前资产的完整内容"),
-      instructions: z.string().describe("用户的修改指令"),
-    }),
-    execute: async ({ assetType, currentContent, instructions }) => {
-      try {
-        switch (assetType) {
-          case "script": {
-            const revised = await reviseScript(currentContent, instructions);
-            return { success: true, assetType, data: revised, summary: { assetType: "script", charCount: revised.length } };
-          }
-          case "ppt": {
-            const revised = await revisePpt(JSON.parse(currentContent), instructions);
-            return { success: true, assetType, data: revised, summary: { assetType: "ppt", slideCount: revised.totalSlides } };
-          }
-          case "onepager": {
-            const revised = await reviseOnePager(JSON.parse(currentContent), instructions);
-            return { success: true, assetType, data: revised, summary: { assetType: "onepager", projectName: revised.projectName } };
-          }
+    // ===== planStrategy：inputSchema 为空，上下文由代码注入 =====
+    // Bug 2 修复：旧方案要求 LLM 填 9 个字段（projectName, coreFeatures 等），
+    // 弱模型经常漏填或幻觉。现在所有上下文通过闭包从消息历史提取。
+    planStrategy: tool({
+      description: "根据项目理解和展示场景，规划展示策略。直接调用即可，无需填写参数。",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!understanding) return { error: "未找到项目分析结果，请先分析项目" };
+        if (!scenario) return { error: "未找到场景选择，请先选择展示场景" };
+        try {
+          const result = await planStrategy({
+            scenario,
+            projectUnderstanding: understanding,
+          });
+          return {
+            success: true,
+            data: result,
+            summary: {
+              scenarioLabel: result.scenarioLabel,
+              assetCount: result.recommendedAssets.length,
+              assetLabels: result.recommendedAssets.map((a) => a.label),
+              totalDuration: result.totalDuration,
+            },
+          };
+        } catch (err) {
+          return { error: `策略规划失败: ${err instanceof Error ? err.message : String(err)}` };
         }
-      } catch (err) {
-        return { error: `资产修改失败: ${err instanceof Error ? err.message : String(err)}` };
-      }
-    },
-  }),
-};
+      },
+    }),
+
+    // ===== generateScript/PPT/OnePager：inputSchema 为空，上下文由代码注入 =====
+    // Bug 2 修复：旧方案要求 LLM 填 13 个字段，现在全部自动提取
+    generateScript: tool({
+      description: "生成完整的演讲稿（Markdown 格式）。直接调用即可，无需填写参数。",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!understanding) return { error: "未找到项目分析结果" };
+        if (!strategy) return { error: "未找到展示策略" };
+        try {
+          const script = await generateScript({
+            projectUnderstanding: understanding,
+            displayStrategy: strategy,
+          });
+          return {
+            success: true,
+            data: script,
+            summary: { charCount: script.length, estimatedMinutes: Math.round(script.length / 250) },
+          };
+        } catch (err) {
+          return { error: `讲稿生成失败: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      },
+    }),
+
+    generatePPT: tool({
+      description: "生成 PPT 大纲（每页标题、要点、布局）。直接调用即可，无需填写参数。",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!understanding) return { error: "未找到项目分析结果" };
+        if (!strategy) return { error: "未找到展示策略" };
+        try {
+          const ppt = await generatePPT({
+            projectUnderstanding: understanding,
+            displayStrategy: strategy,
+          });
+          return {
+            success: true,
+            data: ppt,
+            summary: { slideCount: ppt.totalSlides, title: ppt.title },
+          };
+        } catch (err) {
+          return { error: `PPT 大纲生成失败: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      },
+    }),
+
+    generateOnePager: tool({
+      description: "生成项目一页纸（精炼的项目介绍）。直接调用即可，无需填写参数。",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!understanding) return { error: "未找到项目分析结果" };
+        if (!strategy) return { error: "未找到展示策略" };
+        try {
+          const onepager = await generateOnePager({
+            projectUnderstanding: understanding,
+            displayStrategy: strategy,
+          });
+          return {
+            success: true,
+            data: onepager,
+            summary: { projectName: onepager.projectName, tagline: onepager.tagline },
+          };
+        } catch (err) {
+          return { error: `One-pager 生成失败: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      },
+    }),
+
+    // ===== reviseAsset：删除 currentContent，由代码自动提取 =====
+    // Bug 3 修复：旧方案要求 LLM 搬运几千字的资产全文，经常截断或修改。
+    // 现在 LLM 只需指定 assetType 和修改指令，currentContent 由代码提取。
+    reviseAsset: tool({
+      description: "根据用户指令修改已生成的资产",
+      inputSchema: z.object({
+        assetType: z.enum(["script", "ppt", "onepager"]).describe("要修改的资产类型"),
+        instructions: z.string().describe("用户的修改指令"),
+      }),
+      execute: async ({ assetType, instructions }) => {
+        // 代码从消息历史中提取最新版本的资产内容
+        const currentContent = extractLatestAsset(messages, assetType);
+        if (!currentContent) return { error: `未找到 ${assetType} 的内容，请先生成该资产` };
+        try {
+          switch (assetType) {
+            case "script": {
+              const revised = await reviseScript(currentContent, instructions);
+              return { success: true, assetType, data: revised, summary: { assetType: "script", charCount: revised.length } };
+            }
+            case "ppt": {
+              const revised = await revisePpt(JSON.parse(currentContent), instructions);
+              return { success: true, assetType, data: revised, summary: { assetType: "ppt", slideCount: revised.totalSlides } };
+            }
+            case "onepager": {
+              const revised = await reviseOnePager(JSON.parse(currentContent), instructions);
+              return { success: true, assetType, data: revised, summary: { assetType: "onepager", projectName: revised.projectName } };
+            }
+          }
+        } catch (err) {
+          return { error: `资产修改失败: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      },
+    }),
+  };
+}
 
 // ========== 状态 → 工具集映射 ==========
 //
 // 这是状态机的核心控制点：每个状态只暴露特定的工具。
 // LLM 看不到其他工具，所以不可能调用错误的工具。
-//
-// 比如在 editing 状态，LLM 只有 reviseAsset 一个工具。
-// 它想"自己输出修改后的文本"？不行——系统会继续等它调工具。
-// 它想调 analyzeProject 重新分析？不行——这个工具不存在于当前调用中。
 
 // 资产类型 → 工具名的映射
 const ASSET_TOOL_MAP: Record<string, string> = {
@@ -296,29 +374,33 @@ const ASSET_TOOL_MAP: Record<string, string> = {
   onepager: "generateOnePager",
 };
 
-function getToolsForState(state: string, messages?: UIMessage[]): ToolSet {
+function getToolsForState(
+  state: string,
+  allTools: ReturnType<typeof buildTools>,
+  messages?: UIMessage[],
+): ToolSet {
   switch (state) {
     case "analyzing":
-      return { analyzeProject: ALL_TOOLS.analyzeProject };
+      return { analyzeProject: allTools.analyzeProject };
 
     case "awaiting_scenario":
-      return { askUserChoice: ALL_TOOLS.askUserChoice };
+      return { askUserChoice: allTools.askUserChoice };
 
     case "planning":
-      return { planStrategy: ALL_TOOLS.planStrategy };
+      return { planStrategy: allTools.planStrategy };
 
     case "awaiting_assets":
-      return { confirmAssets: ALL_TOOLS.confirmAssets };
+      return { confirmAssets: allTools.confirmAssets };
 
     case "generating": {
-      // 关键改动：每次只暴露一个工具（下一个要生成的资产）
+      // 每次只暴露一个工具（下一个要生成的资产）
       // 配合 maxSteps=1，每次 POST 只生成一个资产
       // assistant-ui 的 sendAutomaticallyWhen 会自动触发下一次请求
       if (!messages) {
         return {
-          generateScript: ALL_TOOLS.generateScript,
-          generatePPT: ALL_TOOLS.generatePPT,
-          generateOnePager: ALL_TOOLS.generateOnePager,
+          generateScript: allTools.generateScript,
+          generatePPT: allTools.generatePPT,
+          generateOnePager: allTools.generateOnePager,
         };
       }
       const remaining = getRemainingAssets(messages);
@@ -326,14 +408,14 @@ function getToolsForState(state: string, messages?: UIMessage[]): ToolSet {
       // 只暴露第一个待生成的资产对应的工具
       const nextAsset = remaining[0];
       const toolName = ASSET_TOOL_MAP[nextAsset];
-      if (toolName && ALL_TOOLS[toolName as keyof typeof ALL_TOOLS]) {
-        return { [toolName]: ALL_TOOLS[toolName as keyof typeof ALL_TOOLS] };
+      if (toolName && allTools[toolName as keyof typeof allTools]) {
+        return { [toolName]: allTools[toolName as keyof typeof allTools] };
       }
       return {};
     }
 
     case "editing":
-      return { reviseAsset: ALL_TOOLS.reviseAsset };
+      return { reviseAsset: allTools.reviseAsset };
 
     default:
       return {};
@@ -341,48 +423,20 @@ function getToolsForState(state: string, messages?: UIMessage[]): ToolSet {
 }
 
 // ========== API 路由处理器 ==========
-//
-// 新的请求处理流程：
-//   1. 解析消息 → 2. 推导状态 → 3. 选 prompt + 工具 → 4. streamText → 5. 返回
-//
-// 对比旧方案的 "一个大 streamText + 全部工具"，新方案每次只给 LLM
-// 最少的信息和最少的工具，让它做最简单的事。
 
 export async function POST(req: Request) {
   const { messages }: { messages: UIMessage[] } = await req.json();
 
-  // 调试日志
-  for (const msg of messages) {
-    if (msg.role === "assistant") {
-      for (const part of msg.parts) {
-        if (typeof part.type === "string" && part.type.startsWith("tool-")) {
-          const p = part as Record<string, unknown>;
-          console.log("[DEBUG] tool part:", JSON.stringify({
-            type: p.type, state: p.state, hasOutput: p.output !== undefined,
-          }));
-        }
-      }
-    }
-  }
-
   // Step 1: 推导状态
   const state = deriveState(messages);
-  console.log("[DEBUG] derived state:", state);
+  console.log("[STATE]", state);
 
   // ===== 固定参数的前端工具：跳过 LLM，代码直接发起工具调用 =====
   //
-  // 原理：askUserChoice 和 confirmAssets 是前端工具（无 execute）。
-  // 它们的参数在某些状态下是完全固定的（比如场景选择的 5 个选项）。
-  // 如果让 LLM 填参数，它经常填错（自己编问题和选项）。
-  //
-  // 解决：直接用 createUIMessageStream 构造一个包含工具调用的响应，
-  // 发送 "tool-input-available" chunk 给前端。前端会渲染对应的组件
-  // （ChoiceSelector / AssetSelector），和正常工具调用完全一样。
-  //
-  // 这是状态机架构的另一个优势：某些步骤完全不需要 LLM 参与。
+  // askUserChoice 和 confirmAssets 是前端工具（无 execute）。
+  // 参数完全固定，不需要 LLM 参与。
 
   if (state === "awaiting_scenario") {
-    // 场景选择的参数是固定的，不需要 LLM
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         writer.write({
@@ -400,7 +454,6 @@ export async function POST(req: Request) {
   }
 
   if (state === "awaiting_assets") {
-    // 从消息历史中提取 planStrategy 的结果，拿到 recommendedAssets
     const recommendedAssets = extractRecommendedAssets(messages);
     if (recommendedAssets.length > 0) {
       const stream = createUIMessageStream({
@@ -418,9 +471,13 @@ export async function POST(req: Request) {
     // 如果没找到推荐资产，fallthrough 让 LLM 处理
   }
 
-  // ===== 需要 LLM 的状态：走 streamText =====
+  // ===== 需要 LLM 的状态：构建工具 + streamText =====
+
+  // 每次请求动态构建工具（通过闭包注入消息历史中的上下文）
+  const allTools = buildTools(messages);
+  const tools = getToolsForState(state, allTools, messages);
+
   let systemPrompt = STATE_PROMPTS[state];
-  const tools = getToolsForState(state, messages);
 
   if (state === "generating") {
     const remaining = getRemainingAssets(messages);
@@ -431,13 +488,10 @@ export async function POST(req: Request) {
       onepager: "一页纸(generateOnePager)",
     };
     systemPrompt += `\n现在生成：${assetLabels[nextAsset] || nextAsset}。只调用这一个工具。`;
-    console.log("[DEBUG] generating next:", nextAsset);
   }
 
   const modelMessages = await convertToModelMessages(messages);
 
-  // 所有状态统一 maxSteps=1：每次 POST 只做一件事
-  // assistant-ui 的 sendAutomaticallyWhen 会在工具完成后自动触发下一次请求
   const result = streamText({
     model,
     system: systemPrompt,
@@ -451,26 +505,3 @@ export async function POST(req: Request) {
 
   return result.toUIMessageStreamResponse();
 }
-
-// 从消息历史中提取 planStrategy 返回的 recommendedAssets
-function extractRecommendedAssets(messages: UIMessage[]): { type: string; label: string; reason: string }[] {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role !== "assistant") continue;
-    for (const part of msg.parts) {
-      const p = part as Record<string, unknown>;
-      if (
-        typeof p.type === "string" &&
-        p.type === "tool-planStrategy" &&
-        p.output
-      ) {
-        const output = p.output as { success?: boolean; data?: { recommendedAssets?: { type: string; label: string; reason: string }[] } };
-        if (output.success && output.data?.recommendedAssets) {
-          return output.data.recommendedAssets;
-        }
-      }
-    }
-  }
-  return [];
-}
-
