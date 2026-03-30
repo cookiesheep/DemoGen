@@ -497,46 +497,9 @@ export async function POST(req: Request) {
     systemPrompt += `\n现在生成：${assetLabels[nextAsset] || nextAsset}。只调用这一个工具。`;
   }
 
-  const rawModelMessages = await convertToModelMessages(messages);
-
-  // 修复：中转 API + Claude API 的兼容性问题
-  //
-  // 问题链条：
-  //   1. assistant-ui 生成只有 tool-call 没有文本的 assistant 消息
-  //   2. convertToModelMessages 转换后 assistant 消息只有 tool-call parts
-  //   3. @ai-sdk/openai provider 转 OpenAI 格式时设 content: "" 或 null
-  //   4. 中转 API 转发给 Claude API
-  //   5. Claude API 拒绝空 text content block
-  //
-  // 修复：给只有 tool-call 的 assistant 消息注入一个占位文本 part
-  const modelMessages = JSON.parse(JSON.stringify(rawModelMessages));
-  for (const msg of modelMessages) {
-    if (msg.role === "assistant" && Array.isArray(msg.content)) {
-      const hasText = msg.content.some(
-        (b: Record<string, unknown>) => b.type === "text" && b.text && String(b.text).trim() !== ""
-      );
-      const hasToolCall = msg.content.some(
-        (b: Record<string, unknown>) => b.type === "tool-call"
-      );
-      if (hasToolCall && !hasText) {
-        // 注入占位文本，防止 Claude API 报 "text content blocks must be non-empty"
-        msg.content.unshift({ type: "text", text: "调用工具中。" });
-      }
-      // 过滤掉已有的空文本 block
-      msg.content = msg.content.filter((b: Record<string, unknown>) => {
-        if (b.type === "text" && (!b.text || String(b.text).trim() === "")) return false;
-        return true;
-      });
-    }
-  }
-  console.log("[DEBUG] modelMessages count:", modelMessages.length);
-  for (let i = 0; i < modelMessages.length; i++) {
-    const msg = modelMessages[i];
-    console.log(`[DEBUG] msg[${i}]:`, JSON.stringify(msg).slice(0, 500));
-  }
-
-  // 也检查 streamText 实际会发送什么——把过滤后的 messages 序列化看看
-  console.log("[DEBUG] full messages JSON:", JSON.stringify(modelMessages).slice(0, 2000));
+  // 转换为 model messages 供 streamText 使用
+  // 注意：中转 API 的空 content 兼容性问题已在 client.ts 的 patchedFetch 中修复
+  const modelMessages = await convertToModelMessages(messages);
 
   const result = streamText({
     model,
