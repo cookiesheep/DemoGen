@@ -289,7 +289,14 @@ const ALL_TOOLS = {
 // 它想"自己输出修改后的文本"？不行——系统会继续等它调工具。
 // 它想调 analyzeProject 重新分析？不行——这个工具不存在于当前调用中。
 
-function getToolsForState(state: string): ToolSet {
+// 资产类型 → 工具名的映射
+const ASSET_TOOL_MAP: Record<string, string> = {
+  script: "generateScript",
+  ppt: "generatePPT",
+  onepager: "generateOnePager",
+};
+
+function getToolsForState(state: string, messages?: UIMessage[]): ToolSet {
   switch (state) {
     case "analyzing":
       return { analyzeProject: ALL_TOOLS.analyzeProject };
@@ -303,13 +310,27 @@ function getToolsForState(state: string): ToolSet {
     case "awaiting_assets":
       return { confirmAssets: ALL_TOOLS.confirmAssets };
 
-    case "generating":
-      // 生成阶段暴露所有资产生成工具（LLM 按需调用）
-      return {
-        generateScript: ALL_TOOLS.generateScript,
-        generatePPT: ALL_TOOLS.generatePPT,
-        generateOnePager: ALL_TOOLS.generateOnePager,
-      };
+    case "generating": {
+      // 关键改动：每次只暴露一个工具（下一个要生成的资产）
+      // 配合 maxSteps=1，每次 POST 只生成一个资产
+      // assistant-ui 的 sendAutomaticallyWhen 会自动触发下一次请求
+      if (!messages) {
+        return {
+          generateScript: ALL_TOOLS.generateScript,
+          generatePPT: ALL_TOOLS.generatePPT,
+          generateOnePager: ALL_TOOLS.generateOnePager,
+        };
+      }
+      const remaining = getRemainingAssets(messages);
+      if (remaining.length === 0) return {};
+      // 只暴露第一个待生成的资产对应的工具
+      const nextAsset = remaining[0];
+      const toolName = ASSET_TOOL_MAP[nextAsset];
+      if (toolName && ALL_TOOLS[toolName as keyof typeof ALL_TOOLS]) {
+        return { [toolName]: ALL_TOOLS[toolName as keyof typeof ALL_TOOLS] };
+      }
+      return {};
+    }
 
     case "editing":
       return { reviseAsset: ALL_TOOLS.reviseAsset };
@@ -399,36 +420,33 @@ export async function POST(req: Request) {
 
   // ===== 需要 LLM 的状态：走 streamText =====
   let systemPrompt = STATE_PROMPTS[state];
-  const tools = getToolsForState(state);
-
-  // generating 状态：动态计算 maxSteps = 还需生成的资产数量
-  // 这样 LLM 生成完所有资产后正好用完步数，不会多余地重复调用
-  let maxSteps = STATE_STREAM_CONFIG[state].maxSteps;
-  const toolChoice = STATE_STREAM_CONFIG[state].toolChoice;
+  const tools = getToolsForState(state, messages);
 
   if (state === "generating") {
     const remaining = getRemainingAssets(messages);
+    const nextAsset = remaining[0];
     const assetLabels: Record<string, string> = {
       script: "讲稿(generateScript)",
       ppt: "PPT大纲(generatePPT)",
       onepager: "一页纸(generateOnePager)",
     };
-    const remainingList = remaining.map((a) => assetLabels[a] || a).join("、");
-    systemPrompt += `\n还需要生成：${remainingList}。每个只生成一次，不要重复。`;
-    // 精确控制步数：还有几个资产就给几步
-    maxSteps = remaining.length;
-    console.log("[DEBUG] generating remaining:", remaining, "maxSteps:", maxSteps);
+    systemPrompt += `\n现在生成：${assetLabels[nextAsset] || nextAsset}。只调用这一个工具。`;
+    console.log("[DEBUG] generating next:", nextAsset);
   }
 
   const modelMessages = await convertToModelMessages(messages);
 
+  // 所有状态统一 maxSteps=1：每次 POST 只做一件事
+  // assistant-ui 的 sendAutomaticallyWhen 会在工具完成后自动触发下一次请求
   const result = streamText({
     model,
     system: systemPrompt,
     messages: modelMessages,
     tools,
-    stopWhen: stepCountIs(maxSteps),
-    toolChoice,
+    stopWhen: stepCountIs(1),
+    // editing 用 auto：用户闲聊时 LLM 可以只回复文字，不强制调工具
+    // 其他状态用 required：确保 LLM 必须调用唯一可用的工具
+    toolChoice: state === "editing" ? "auto" : "required",
   });
 
   return result.toUIMessageStreamResponse();
@@ -456,22 +474,3 @@ function extractRecommendedAssets(messages: UIMessage[]): { type: string; label:
   return [];
 }
 
-// 每个状态的 streamText 配置
-const STATE_STREAM_CONFIG: Record<
-  string,
-  { maxSteps: number; toolChoice: "auto" | "required" }
-> = {
-  // 分析：强制调 analyzeProject，调完停
-  analyzing:        { maxSteps: 1, toolChoice: "required" },
-  // 场景选择：强制调 askUserChoice（前端工具），调完停
-  awaiting_scenario: { maxSteps: 1, toolChoice: "required" },
-  // 策略规划：强制调 planStrategy，调完停
-  planning:         { maxSteps: 1, toolChoice: "required" },
-  // 资产确认：强制调 confirmAssets（前端工具），调完停
-  awaiting_assets:  { maxSteps: 1, toolChoice: "required" },
-  // 生成资产：强制调工具，可连续调多个（讲稿+PPT+一页纸）
-  generating:       { maxSteps: 5, toolChoice: "required" },
-  // 编辑模式：用户可能聊天也可能要修改，所以 auto
-  // maxSteps=1 确保调完 reviseAsset 后立即停止，不输出废话
-  editing:          { maxSteps: 1, toolChoice: "auto" },
-};
