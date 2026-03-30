@@ -177,6 +177,7 @@ function buildTools(messages: UIMessage[]) {
         documents: z.array(z.string()).optional().describe("用户上传的文档内容"),
       }),
       execute: async ({ githubUrl, description, documents }) => {
+        console.log("[DEBUG analyzeProject] input:", { githubUrl, description: description?.slice(0, 100), docCount: documents?.length });
         let githubData = undefined;
         if (githubUrl) {
           const parsed = parseGitHubUrl(githubUrl);
@@ -185,6 +186,12 @@ function buildTools(messages: UIMessage[]) {
           }
           try {
             githubData = await analyzeRepo(parsed.owner, parsed.repo);
+            console.log("[DEBUG analyzeProject] github data fetched:", {
+              owner: parsed.owner, repo: parsed.repo,
+              hasReadme: !!githubData.readme,
+              readmeLen: githubData.readme?.length,
+              treeLen: githubData.directoryTree?.length,
+            });
           } catch (err) {
             return { error: `获取 GitHub 仓库数据失败: ${err instanceof Error ? err.message : String(err)}` };
           }
@@ -491,6 +498,21 @@ export async function POST(req: Request) {
   }
 
   const modelMessages = await convertToModelMessages(messages);
+
+  // 过滤空文本 content block — createUIMessageStream 直接发工具调用时，
+  // assistant-ui 会生成空文本 part，convertToModelMessages 转换后产生
+  // { type: "text", text: "" }，Claude API 不接受空文本 block。
+  for (const msg of modelMessages) {
+    const m = msg as Record<string, unknown>;
+    if (Array.isArray(m.content)) {
+      m.content = (m.content as Array<Record<string, unknown>>).filter((block) => {
+        if (block.type === "text" && (block.text === "" || block.text === undefined)) {
+          return false;
+        }
+        return true;
+      });
+    }
+  }
 
   const result = streamText({
     model,
