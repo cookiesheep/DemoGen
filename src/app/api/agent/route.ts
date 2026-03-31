@@ -166,6 +166,26 @@ function buildTools(messages: UIMessage[]) {
   const scenario = extractScenario(messages);
   const strategy = extractStrategy(messages);
 
+  // 关键调试：确认上下文提取是否成功
+  console.log("[CONTEXT]", {
+    understanding: understanding ? understanding.name : null,
+    scenario,
+    strategy: strategy ? strategy.scenarioLabel : null,
+  });
+
+  // DEBUG: 如果 scenario 为 null，打印所有 assistant parts 帮助定位
+  if (!scenario) {
+    for (const msg of messages) {
+      if (msg.role !== "assistant") continue;
+      for (const part of msg.parts) {
+        const p = part as Record<string, unknown>;
+        if (typeof p.type === "string" && p.type.includes("Choice")) {
+          console.log("[DEBUG scenario extraction] found part:", JSON.stringify(p).slice(0, 300));
+        }
+      }
+    }
+  }
+
   return {
     // ===== analyzeProject：LLM 从用户输入提取参数（这是合理的） =====
     // 用户的 GitHub 链接/描述/文档在用户消息中，LLM 提取这些是它擅长的
@@ -460,6 +480,82 @@ export async function POST(req: Request) {
     return createUIMessageStreamResponse({ stream });
   }
 
+  // ===== planning：直接执行子 agent + 写入 confirmAssets，无需 LLM 中转 =====
+  //
+  // 旧方案：streamText → LLM 调 planStrategy → stopWhen(1) 结束 → 期望 sendAutomatically 触发下一 POST
+  // 问题：streamText 返回的 server-side tool 响应，客户端 lastAssistantMessageIsCompleteWithToolCalls
+  //       无法正确判定为 complete，sendAutomatically 不触发，流程卡死。
+  //
+  // 新方案：直接 createUIMessageStream，同一个 POST 内：
+  //   1. 写 planStrategy tool-input → 执行子 agent → 写 tool-output（状态机检测完成）
+  //   2. 接着写 confirmAssets tool-input（前端工具，requires-action，等用户选择）
+  //   用户选完 → addResult → lastAssistantMessageIsCompleteWithToolCalls = true → generating POST
+  if (state === "planning") {
+    const understanding = extractProjectUnderstanding(messages);
+    const scenario = extractScenario(messages);
+    const planToolCallId = `call-plan-${Date.now()}`;
+
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        // Step 1: 声明 planStrategy 工具调用
+        writer.write({
+          type: "tool-input-available",
+          toolCallId: planToolCallId,
+          toolName: "planStrategy",
+          input: {},
+        });
+
+        if (!understanding || !scenario) {
+          writer.write({
+            type: "tool-output-available",
+            toolCallId: planToolCallId,
+            output: { error: "缺少项目理解或场景信息，请重新分析" },
+          });
+          return;
+        }
+
+        try {
+          console.log("[planning] running planStrategy subagent...");
+          const result = await planStrategy({ scenario, projectUnderstanding: understanding });
+          console.log("[planning] planStrategy done, assets:", result.recommendedAssets.map((a) => a.label));
+
+          // Step 2: 写入 planStrategy 结果（让状态机检测到 planStrategy 已完成）
+          writer.write({
+            type: "tool-output-available",
+            toolCallId: planToolCallId,
+            output: {
+              success: true,
+              data: result,
+              summary: {
+                scenarioLabel: result.scenarioLabel,
+                assetCount: result.recommendedAssets.length,
+                assetLabels: result.recommendedAssets.map((a) => a.label),
+                totalDuration: result.totalDuration,
+              },
+            },
+          });
+
+          // Step 3: 写入 confirmAssets（前端工具，等待用户选择）
+          writer.write({
+            type: "tool-input-available",
+            toolCallId: `call-assets-${Date.now()}`,
+            toolName: "confirmAssets",
+            input: { recommendedAssets: result.recommendedAssets },
+          });
+        } catch (err) {
+          console.error("[planning] planStrategy failed:", err);
+          writer.write({
+            type: "tool-output-available",
+            toolCallId: planToolCallId,
+            output: { error: `策略规划失败: ${err instanceof Error ? err.message : String(err)}` },
+          });
+        }
+      },
+    });
+    return createUIMessageStreamResponse({ stream });
+  }
+
+  // awaiting_assets 状态保留作为兜底（正常流程已在 planning 合并处理）
   if (state === "awaiting_assets") {
     const recommendedAssets = extractRecommendedAssets(messages);
     if (recommendedAssets.length > 0) {
@@ -475,42 +571,83 @@ export async function POST(req: Request) {
       });
       return createUIMessageStreamResponse({ stream });
     }
-    // 如果没找到推荐资产，fallthrough 让 LLM 处理
   }
 
-  // ===== 需要 LLM 的状态：构建工具 + streamText =====
-
-  // 每次请求动态构建工具（通过闭包注入消息历史中的上下文）
-  const allTools = buildTools(messages);
-  const tools = getToolsForState(state, allTools, messages);
-
-  let systemPrompt = STATE_PROMPTS[state];
-
+  // ===== generating：直接执行子 agent，无需 LLM 中转 =====
+  //
+  // 与 planning 同理：streamText + relay API 下 LLM 不可靠地调用带 execute 的工具。
+  // 每次 POST 只生成一个资产，写入 tool-input + tool-output，状态机检测后
+  // sendAutomatically 触发下一个 POST 继续生成下一个资产。
   if (state === "generating") {
     const remaining = getRemainingAssets(messages);
+    const understanding = extractProjectUnderstanding(messages);
+    const strategy = extractStrategy(messages);
     const nextAsset = remaining[0];
-    const assetLabels: Record<string, string> = {
-      script: "讲稿(generateScript)",
-      ppt: "PPT大纲(generatePPT)",
-      onepager: "一页纸(generateOnePager)",
+
+    const TOOL_NAMES: Record<string, string> = {
+      script: "generateScript",
+      ppt: "generatePPT",
+      onepager: "generateOnePager",
     };
-    systemPrompt += `\n现在生成：${assetLabels[nextAsset] || nextAsset}。只调用这一个工具。`;
+    const toolName = TOOL_NAMES[nextAsset] || "generateScript";
+    const toolCallId = `call-gen-${nextAsset}-${Date.now()}`;
+
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        writer.write({ type: "tool-input-available", toolCallId, toolName, input: {} });
+
+        if (!understanding || !strategy) {
+          writer.write({ type: "tool-output-available", toolCallId, output: { error: "缺少项目理解或策略，请重新开始" } });
+          return;
+        }
+        if (!nextAsset) {
+          writer.write({ type: "tool-output-available", toolCallId, output: { error: "没有待生成的资产" } });
+          return;
+        }
+
+        try {
+          console.log(`[generating] generating ${nextAsset}...`);
+          if (nextAsset === "script") {
+            const script = await generateScript({ projectUnderstanding: understanding, displayStrategy: strategy });
+            writer.write({ type: "tool-output-available", toolCallId, output: { success: true, data: script, summary: { charCount: script.length } } });
+          } else if (nextAsset === "ppt") {
+            const ppt = await generatePPT({ projectUnderstanding: understanding, displayStrategy: strategy });
+            writer.write({ type: "tool-output-available", toolCallId, output: { success: true, data: ppt, summary: { slideCount: ppt.totalSlides, title: ppt.title } } });
+          } else if (nextAsset === "onepager") {
+            const onepager = await generateOnePager({ projectUnderstanding: understanding, displayStrategy: strategy });
+            writer.write({ type: "tool-output-available", toolCallId, output: { success: true, data: onepager, summary: { projectName: onepager.projectName } } });
+          }
+          console.log(`[generating] ${nextAsset} done`);
+        } catch (err) {
+          console.error(`[generating] ${nextAsset} failed:`, err);
+          writer.write({ type: "tool-output-available", toolCallId, output: { error: `${nextAsset} 生成失败: ${err instanceof Error ? err.message : String(err)}` } });
+        }
+      },
+    });
+    return createUIMessageStreamResponse({ stream });
   }
 
-  // 转换为 model messages 供 streamText 使用
-  // 注意：中转 API 的空 content 兼容性问题已在 client.ts 的 patchedFetch 中修复
+  // ===== 需要 LLM 的状态：只剩 editing =====
+
+  const allTools = buildTools(messages);
+  const tools = getToolsForState(state, allTools, messages);
+  const systemPrompt = STATE_PROMPTS[state];
+
   const modelMessages = await convertToModelMessages(messages);
 
-  const result = streamText({
-    model,
-    system: systemPrompt,
-    messages: modelMessages,
-    tools,
-    stopWhen: stepCountIs(1),
-    // editing 用 auto：用户闲聊时 LLM 可以只回复文字，不强制调工具
-    // 其他状态用 required：确保 LLM 必须调用唯一可用的工具
-    toolChoice: state === "editing" ? "auto" : "required",
-  });
+  try {
+    const result = streamText({
+      model,
+      system: systemPrompt,
+      messages: modelMessages,
+      tools,
+      stopWhen: stepCountIs(1),
+      toolChoice: "auto",
+    });
 
-  return result.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse();
+  } catch (err) {
+    console.error("[ERROR] streamText failed:", err);
+    throw err;
+  }
 }

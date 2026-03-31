@@ -89,8 +89,12 @@ function getSelectedAssets(completedCalls: CompletedToolCall[]): string[] {
     .reverse()
     .find((c) => c.toolName === "confirmAssets");
 
-  if (!confirmCall) return [];
+  if (!confirmCall) {
+    console.log("[state-machine] getSelectedAssets: no confirmAssets found");
+    return [];
+  }
   const result = confirmCall.result as { selectedAssets?: string[] };
+  console.log("[state-machine] getSelectedAssets:", result.selectedAssets);
   return result.selectedAssets || [];
 }
 

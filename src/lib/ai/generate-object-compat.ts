@@ -105,7 +105,7 @@ export async function generateObjectCompat<T>({
 
   const rawText = result.text;
   console.log("[DEBUG generateObjectCompat] raw text length:", rawText.length);
-  console.log("[DEBUG generateObjectCompat] raw text preview:", rawText.slice(0, 200));
+  console.log("[DEBUG generateObjectCompat] raw text preview:", rawText.slice(0, 800));
 
   // 从响应中提取 JSON
   const jsonStr = extractJson(rawText);
